@@ -2,7 +2,7 @@ import json
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 
-app = FastAPI()
+app = FastAPI()hhhh
 
 # Configuration
 VERIFY_TOKEN = "my_bot_token_2026"
