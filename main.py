@@ -19,8 +19,13 @@ from database import (
     get_recent_messages_by_platform,
     get_latest_messages_all,
     get_todays_stats,
+    create_pending_action,
 )
-from summarizer import summarize_messages, generate_draft_replies
+from summarizer import (
+    summarize_messages,
+    generate_draft_replies,
+    process_user_chat_command,
+)
 from telegram_bot import (
     send_telegram_message,
     send_telegram_ack,
@@ -41,6 +46,10 @@ logger = logging.getLogger("ExecutiveAssistant")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "my_secure_token")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DIGEST_INTERVAL_SECONDS = int(os.getenv("DIGEST_INTERVAL_SECONDS", "300"))
+BOT_PASSWORD = os.getenv("BOT_PASSWORD", "admin123")
+
+# In-memory store for authenticated Telegram Chat IDs
+authenticated_chats = set()
 
 
 # ==========================================
@@ -48,7 +57,7 @@ DIGEST_INTERVAL_SECONDS = int(os.getenv("DIGEST_INTERVAL_SECONDS", "300"))
 # ==========================================
 
 async def periodic_digest_worker():
-    """Background loop jo har set interval par automatically digest chalata hai."""
+    """Background loop jo automatically regular intervals par digest chalaata hai."""
     logger.info(f"Background worker started (running every {DIGEST_INTERVAL_SECONDS}s)...")
     while True:
         try:
@@ -80,7 +89,7 @@ app = FastAPI(title="AI Executive Assistant", lifespan=lifespan)
 
 
 # ==========================================
-# 0. DIAGNOSTICS & MANUAL TRIGGER ENDPOINTS
+# 0. MANUAL TRIGGER ENDPOINTS
 # ==========================================
 
 @app.get("/health")
@@ -132,7 +141,7 @@ async def receive_whatsapp_message(request: Request):
 
 
 # ==========================================
-# 2. TELEGRAM WEBHOOK (Buttons & Commands)
+# 2. TELEGRAM WEBHOOK (Buttons, Actions & AI Chat)
 # ==========================================
 
 @app.post("/webhook/telegram")
@@ -148,6 +157,11 @@ async def telegram_webhook(request: Request):
         cb_id = cb["id"]
         cb_data = cb.get("data", "")
         chat_id = cb.get("message", {}).get("chat", {}).get("id")
+
+        # Check authentication for buttons
+        if chat_id not in authenticated_chats:
+            await send_telegram_ack(cb_id, "Access Denied. Pehle password enter karein.")
+            return Response(status_code=200)
 
         try:
             if cb_data.startswith("approve_"):
@@ -192,7 +206,7 @@ async def telegram_webhook(request: Request):
                 await send_telegram_ack(cb_id, "Edit mode activated.")
                 await send_telegram_message(
                     chat_id,
-                    f"✏️ **Edit Draft (ID: {action_id})**\n\nNiche apna customized reply type karke send karein:",
+                    f"✏️ **Edit Draft (ID: {action_id})**\n\nNiche apna modified reply likh kar send karein:",
                 )
 
             elif cb_data.startswith("dismiss_"):
@@ -207,12 +221,32 @@ async def telegram_webhook(request: Request):
 
         return Response(status_code=200)
 
-    # Case B: Text message (Menu buttons, commands, ya edit reply text)
+    # Case B: Text message (Menu buttons, commands, or typed queries)
     if "message" in data and "text" in data["message"]:
         chat_id = data["message"]["chat"]["id"]
         user_text = data["message"]["text"].strip()
 
-        # 1. Check if user is editing a pending draft
+        # ==========================================
+        # PASSWORD AUTHENTICATION GATE
+        # ==========================================
+        if chat_id not in authenticated_chats:
+            if user_text == BOT_PASSWORD:
+                authenticated_chats.add(chat_id)
+                welcome = (
+                    "🔓 **Access Granted!**\n\n"
+                    "Aapka session authenticate ho chuka hai. Niche diye gaye menu se actions control karein:"
+                )
+                await send_telegram_message(chat_id, welcome, reply_markup=get_main_menu_keyboard())
+                return Response(status_code=200)
+            else:
+                lock_msg = (
+                    "🔒 **Access Denied / Protected Bot**\n\n"
+                    "Ye ek private bot hai. Use karne ke liye kripya **password** type karke send karein."
+                )
+                await send_telegram_message(chat_id, lock_msg)
+                return Response(status_code=200)
+
+        # 1. Check if user is currently editing a draft
         editing_action = await get_editing_action()
         if editing_action:
             updated = await update_pending_action_text(editing_action.id, user_text)
@@ -237,12 +271,12 @@ async def telegram_webhook(request: Request):
         if user_text in ["/start", "/menu"]:
             welcome = (
                 "👋 **Executive Assistant Control Panel**\n\n"
-                "Niche diye gaye options par tap karein ya quick summary check karein:"
+                "Niche diye gaye options par tap karein ya seedhe koi bhi message/instruction type karein:"
             )
             await send_telegram_message(chat_id, welcome, reply_markup=get_main_menu_keyboard())
             return Response(status_code=200)
 
-        # 3. Option: Today's Update
+        # 3. Today's Update
         elif user_text in ["📊 Today's Update", "/today"]:
             counts, pending = await get_todays_stats()
             stats_msg = "📈 **Today's Activity Overview**\n\n"
@@ -255,7 +289,7 @@ async def telegram_webhook(request: Request):
             await send_telegram_message(chat_id, stats_msg)
             return Response(status_code=200)
 
-        # 4. Option: Last 5 Emails (Read + Unread Live from Inbox)
+        # 4. Last 5 Emails (Read + Unread Live from Inbox)
         elif user_text in ["✉️ Last 5 Emails", "/mails"]:
             await send_telegram_message(chat_id, "🔍 Inbox se latest 5 emails fetch ho rahe hain...")
             emails = await fetch_latest_emails(limit=5)
@@ -274,7 +308,7 @@ async def telegram_webhook(request: Request):
             await send_telegram_message(chat_id, reply)
             return Response(status_code=200)
 
-        # 5. Option: Last 5 WhatsApp Messages
+        # 5. Last 5 WhatsApp Messages
         elif user_text in ["💬 Last 5 WhatsApp", "/whatsapp"]:
             chats = await get_recent_messages_by_platform("whatsapp", limit=5)
             if not chats:
@@ -288,7 +322,7 @@ async def telegram_webhook(request: Request):
             await send_telegram_message(chat_id, reply)
             return Response(status_code=200)
 
-        # 6. Option: All Recent Messages
+        # 6. All Recent Messages
         elif user_text in ["📋 All Recent Messages", "/recent"]:
             all_msgs = await get_latest_messages_all(limit=5)
             if not all_msgs:
@@ -302,11 +336,42 @@ async def telegram_webhook(request: Request):
             await send_telegram_message(chat_id, reply)
             return Response(status_code=200)
 
-        # 7. Option: Run Full Digest On-Demand
+        # 7. Run Full Digest On-Demand
         elif user_text in ["🚀 Run Full Digest", "/digest"]:
             await send_telegram_message(chat_id, "⏳ Pipeline trigger ho rahi hai...")
             asyncio.create_task(dispatch_full_digest())
             return Response(status_code=200)
+
+        # 8. Natural Language User Text / Custom Command Processing
+        else:
+            await send_telegram_message(chat_id, "🧠 Processing...")
+            result = await process_user_chat_command(user_text)
+
+            if result.get("intent") == "chat":
+                await send_telegram_message(chat_id, result.get("reply", "Done."))
+                return Response(status_code=200)
+
+            elif result.get("intent") == "action":
+                platform = result.get("platform", "email").lower()
+                recipient = result.get("recipient", "Unknown")
+                draft = result.get("draft", "")
+                subject = result.get("subject") or "Quick Update"
+
+                action_id = await create_pending_action(
+                    platform=platform,
+                    recipient=recipient,
+                    draft_body=draft,
+                    subject=subject,
+                )
+
+                await send_action_card(
+                    chat_id=chat_id,
+                    action_id=action_id,
+                    platform=platform,
+                    recipient=recipient,
+                    proposed_text=draft,
+                )
+                return Response(status_code=200)
 
     return Response(status_code=200)
 

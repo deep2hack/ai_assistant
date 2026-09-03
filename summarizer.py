@@ -53,6 +53,42 @@ def extract_json_array(text: str) -> list:
     return []
 
 
+def extract_json_object(text: str) -> dict:
+    """Safely extracts a single JSON object from raw LLM output."""
+    if not text:
+        return {}
+
+    clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    if "```" in clean_text:
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean_text, re.DOTALL)
+        if match:
+            clean_text = match.group(1).strip()
+
+    start = clean_text.find("{")
+    end = clean_text.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        candidate = clean_text[start : end + 1]
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    try:
+        decoder = json.JSONDecoder()
+        if start != -1:
+            obj, _ = decoder.raw_decode(clean_text[start:])
+            if isinstance(obj, dict):
+                return obj
+    except Exception as e:
+        print(f"Fallback JSON object parser failed: {e}")
+
+    return {}
+
+
 async def summarize_messages(messages: list) -> str:
     """Generate an executive bullet-point summary using Groq."""
     if not messages:
@@ -163,6 +199,62 @@ Example output format:
     except Exception as e:
         print(f"Error classifying and drafting replies with Groq: {e}")
         return []
+
+
+async def process_user_chat_command(user_text: str) -> dict:
+    """
+    User ke typed message ko process karta hai:
+    - Normal queries/questions ka smart, concise jawab deta hai.
+    - Message/Email dispatch commands (e.g. 'X ko mail bhej do...') par structured action draft banata hai.
+    """
+    if not client:
+        return {"intent": "chat", "reply": "⚠️ GROQ_API_KEY configure nahi hai."}
+
+    prompt = f"""
+You are an intelligent executive AI assistant. The user typed the following input in the control chat:
+"{user_text}"
+
+Analyze intent:
+1. ACTION INTENT: If the user is asking you to compose, draft, or send an email or WhatsApp message.
+   Return ONLY JSON:
+   {{
+     "intent": "action",
+     "platform": "email" or "whatsapp",
+     "recipient": "extracted email or phone or contact name",
+     "subject": "subject line if email, otherwise null",
+     "draft": "the actual drafted text body"
+   }}
+
+2. CHAT/QUERY INTENT: If the user is asking a general question, asking for help, drafting assistance, or conversational queries.
+   Return ONLY JSON:
+   {{
+     "intent": "chat",
+     "reply": "clear, professional, direct response"
+   }}
+
+Output strictly valid JSON with no preamble, markdown fences, or thinking tags.
+"""
+
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a JSON-only assistant. Output strictly a JSON object."},
+                {"role": "user", "content": prompt}
+            ],
+            model=MODEL_NAME,
+            temperature=0.2,
+        )
+        raw_text = chat_completion.choices[0].message.content.strip()
+        result = extract_json_object(raw_text)
+        if result:
+            return result
+    except Exception as e:
+        print(f"Error processing custom chat command: {e}")
+
+    return {
+        "intent": "chat",
+        "reply": "Samajh nahi paya, kripya thoda aur clearly likhein ya command use karein."
+    }
 
 
 generate_summary = summarize_messages
