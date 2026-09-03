@@ -7,9 +7,8 @@ import httpx
 
 load_dotenv()
 
-# WhatsApp Credentials
-WA_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
-WA_PHONE_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+# WhatsApp Node.js Bridge Endpoint (Port 3001)
+WHATSAPP_BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001/send-message")
 
 # Gmail SMTP Credentials
 GMAIL_USER = os.getenv("GMAIL_USER")
@@ -17,35 +16,26 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 
 async def send_whatsapp_reply(to_number: str, message_text: str) -> bool:
-    """Dispatches a direct WhatsApp reply using the official Meta Cloud API."""
-    if not WA_TOKEN or not WA_PHONE_ID:
-        print("Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID in .env")
-        return False
-
-    url = f"https://graph.facebook.com/v21.0/{WA_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WA_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    """
+    Dispatches a WhatsApp message directly via the local Node.js WhatsApp Web bridge.
+    Completely bypasses Meta Cloud API, verified recipient lists, and template constraints.
+    """
     payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to_number,
-        "type": "text",
-        "text": {"body": message_text},
+        "recipient": to_number,
+        "message": message_text
     }
 
     async with httpx.AsyncClient() as client:
         try:
-            res = await client.post(url, json=payload, headers=headers, timeout=10.0)
-            if res.status_code in [200, 201]:
-                print(f"WhatsApp reply sent successfully to {to_number}")
+            res = await client.post(WHATSAPP_BRIDGE_URL, json=payload, timeout=15.0)
+            if res.status_code == 200:
+                print(f"WhatsApp message dispatched successfully to {to_number}")
                 return True
             else:
-                print(f"WhatsApp API Error [{res.status_code}]: {res.text}")
+                print(f"WhatsApp Bridge Error [{res.status_code}]: {res.text}")
                 return False
         except Exception as e:
-            print(f"Exception while sending WhatsApp reply: {e}")
+            print(f"Exception while connecting to WhatsApp bridge: {e}")
             return False
 
 

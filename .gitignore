@@ -1,1 +1,8 @@
-/.env
+whatsapp_bridge/.webjs_cache/
+whatsapp_bridge/node_modules/
+whatsapp_bridge/business_session/
+
+__pycache__/
+*.pyc
+
+.env

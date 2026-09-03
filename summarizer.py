@@ -258,3 +258,82 @@ Output strictly valid JSON with no preamble, markdown fences, or thinking tags.
 
 
 generate_summary = summarize_messages
+
+async def check_important_emails_summary(emails: list) -> str:
+    """Live inbox emails me se urgent/important identify karke brief deta hai."""
+    if not emails:
+        return "Inbox me abhi koi naya email nahi mila."
+    if not client:
+        return "⚠️ Groq API key configured nahi hai."
+
+    content_lines = []
+    for idx, mail in enumerate(emails, start=1):
+        content_lines.append(f"{idx}. From: {mail.get('sender')} | Subject: {mail.get('subject')} | Snippet: {mail.get('snippet')}")
+    mails_text = "\n".join(content_lines)
+
+    prompt = f"""
+You are an executive assistant. Review these recent emails and tell the user if there is anything urgent or important requiring attention (e.g. work requests, meetings, deadlines, payments, client inquiries). 
+
+Ignore newsletters, ads, or routine system notifications.
+
+EMAILS:
+{mails_text}
+
+Respond in simple Hinglish or English:
+- If important emails exist, highlight who sent them and what urgent action is required.
+- If none are important, state that all recent emails are routine or non-urgent.
+Keep it under 3-4 bullet points.
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a concise executive assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            model=MODEL_NAME,
+            temperature=0.2,
+        )
+        raw = completion.choices[0].message.content.strip()
+        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    except Exception as e:
+        return f"Error analyzing emails: {e}"
+async def check_important_whatsapp_summary(messages: list) -> str:
+    """Recent WhatsApp messages me se urgent/actionable chats filter karta hai."""
+    if not messages:
+        return "Database me abhi koi WhatsApp message nahi mila."
+    if not client:
+        return "⚠️ Groq API key configured nahi hai."
+
+    content_lines = []
+    for idx, m in enumerate(messages, start=1):
+        content_lines.append(f"{idx}. From: {m.sender} | Text: {m.content}")
+    chats_text = "\n".join(content_lines)
+
+    prompt = f"""
+You are an executive assistant. Analyze these recent WhatsApp messages and report if there is anything urgent or important requiring immediate response (e.g. client requests, deadlines, meetings, questions).
+
+Ignore routine greetings, small talk, or casual chatter.
+
+MESSAGES:
+{chats_text}
+
+Respond in clean Hinglish or English:
+- If urgent items exist, mention the sender and what action is needed.
+- If no urgent items exist, state that all recent WhatsApp messages are casual or routine.
+Keep it strictly under 3-4 bullet points.
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a concise executive assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            model=MODEL_NAME,
+            temperature=0.2,
+        )
+        raw = completion.choices[0].message.content.strip()
+        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    except Exception as e:
+        return f"Error analyzing WhatsApp messages: {e}"

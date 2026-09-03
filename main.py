@@ -1,6 +1,8 @@
 import os
+import time
 import asyncio
 import logging
+from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, Query, BackgroundTasks
@@ -25,6 +27,8 @@ from summarizer import (
     summarize_messages,
     generate_draft_replies,
     process_user_chat_command,
+    check_important_emails_summary,
+    check_important_whatsapp_summary,
 )
 from telegram_bot import (
     send_telegram_message,
@@ -45,43 +49,37 @@ logger = logging.getLogger("ExecutiveAssistant")
 
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "my_secure_token")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DIGEST_INTERVAL_SECONDS = int(os.getenv("DIGEST_INTERVAL_SECONDS", "300"))
 BOT_PASSWORD = os.getenv("BOT_PASSWORD", "admin123")
+SESSION_TIMEOUT_SECONDS = int(os.getenv("SESSION_TIMEOUT_SECONDS", "7200"))
 
-# In-memory store for authenticated Telegram Chat IDs
-authenticated_chats = set()
+# Stores chat_id -> last_activity_timestamp (Unix epoch)
+authenticated_sessions: dict[int, float] = {}
+
+
+def is_session_active(chat_id: int) -> bool:
+    """Checks if chat session is verified and not expired."""
+    if chat_id not in authenticated_sessions:
+        return False
+
+    last_active = authenticated_sessions[chat_id]
+    if (time.time() - last_active) > SESSION_TIMEOUT_SECONDS:
+        del authenticated_sessions[chat_id]
+        return False
+
+    authenticated_sessions[chat_id] = time.time()
+    return True
 
 
 # ==========================================
-# BACKGROUND WORKER & LIFESPAN
+# LIFESPAN
 # ==========================================
-
-async def periodic_digest_worker():
-    """Background loop jo automatically regular intervals par digest chalaata hai."""
-    logger.info(f"Background worker started (running every {DIGEST_INTERVAL_SECONDS}s)...")
-    while True:
-        try:
-            await dispatch_full_digest()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in background digest loop: {e}", exc_info=True)
-        await asyncio.sleep(DIGEST_INTERVAL_SECONDS)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     await init_db()
     logger.info("Database initialized successfully.")
-
-    worker_task = asyncio.create_task(periodic_digest_worker())
     yield
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
     logger.info("Shutdown complete.")
 
 
@@ -104,7 +102,7 @@ async def trigger_digest(background_tasks: BackgroundTasks):
 
 
 # ==========================================
-# 1. WHATSAPP WEBHOOK
+# 1. WHATSAPP WEBHOOK (AUTONOMOUS PROCESSING)
 # ==========================================
 
 @app.get("/webhook/whatsapp")
@@ -120,7 +118,7 @@ async def verify_whatsapp_webhook(
 
 
 @app.post("/webhook/whatsapp")
-async def receive_whatsapp_message(request: Request):
+async def receive_whatsapp_message(request: Request, background_tasks: BackgroundTasks):
     try:
         data = await request.json()
         entries = data.get("entry", [])
@@ -129,15 +127,96 @@ async def receive_whatsapp_message(request: Request):
                 value = change.get("value", {})
                 for msg in value.get("messages", []):
                     if msg.get("type") == "text":
-                        sender = msg.get("from")
+                        # Display Name ya Phone Number (Database & UI ke liye)
+                        sender_name = msg.get("from")
+                        # Raw WhatsApp JID (@lid ya @c.us - Reply dispatch ke liye)
+                        raw_id = msg.get("raw_id", sender_name)
                         body = msg.get("text", {}).get("body", "").strip()
-                        if sender and body:
-                            await save_message("whatsapp", sender, body)
-                            logger.info(f"Saved WhatsApp from {sender}")
+
+                        if sender_name and body:
+                            # 1. Clean Display Name / Phone number database me save karein
+                            await save_message("whatsapp", sender_name, body)
+                            logger.info(f"Saved WhatsApp from: {sender_name}")
+
+                            # 2. Structured message object for summarizer
+                            msg_obj = SimpleNamespace(
+                                id=None,
+                                platform="whatsapp",
+                                sender=sender_name,
+                                content=body
+                            )
+
+                            # 3. Background autonomous processor (raw_id preserves delivery target)
+                            background_tasks.add_task(
+                                process_realtime_whatsapp,
+                                msg_obj,
+                                sender_name,
+                                raw_id,
+                                body
+                            )
     except Exception as e:
         logger.error(f"Error handling WhatsApp webhook: {e}")
 
     return Response(content="EVENT_RECEIVED", status_code=200)
+
+
+async def process_realtime_whatsapp(saved_msg, display_name: str, delivery_target: str, incoming_text: str):
+    """
+    Evaluates and automatically replies to incoming WhatsApp messages
+    with zero-to-low human engagement.
+    """
+    try:
+        drafts = await generate_draft_replies([saved_msg])
+        if not drafts:
+            logger.info("No draft generated for incoming WhatsApp message.")
+            return
+
+        draft = drafts[0]
+        reply_text = draft.get("proposed_reply", "").strip()
+        can_auto = draft.get("can_auto_reply", True)
+        reason = draft.get("intent_reason", "Routine acknowledgment")
+
+        if not reply_text:
+            return
+
+        # Case A: Autonomous Direct Send (Zero Action Required)
+        if can_auto:
+            logger.info(f"Auto-dispatching WhatsApp reply to destination: {delivery_target}")
+            sent = await send_whatsapp_reply(delivery_target, reply_text)
+
+            if sent:
+                action_id = await save_pending_action("whatsapp", delivery_target, reply_text)
+                await update_pending_action_status(action_id, "EXECUTED")
+                if saved_msg.id:
+                    await mark_messages_summarized([saved_msg.id])
+
+                if TELEGRAM_CHAT_ID:
+                    auto_note = (
+                        f"⚡ **Autonomous WhatsApp Reply Sent**\n\n"
+                        f"**To:** `{display_name}`\n"
+                        f"**Incoming:** _{incoming_text}_\n"
+                        f"**Sent Reply:** _{reply_text}_\n"
+                        f"**Reason:** {reason}"
+                    )
+                    await send_telegram_message(TELEGRAM_CHAT_ID, auto_note)
+                return
+
+        # Case B: Sensitive message fallback - Action Card sent to Telegram
+        action_id = await save_pending_action("whatsapp", delivery_target, reply_text)
+        if saved_msg.id:
+            await mark_messages_summarized([saved_msg.id])
+
+        if TELEGRAM_CHAT_ID:
+            await send_action_card(
+                chat_id=TELEGRAM_CHAT_ID,
+                action_id=action_id,
+                platform="whatsapp",
+                recipient=display_name,
+                proposed_text=reply_text,
+            )
+
+    except Exception as e:
+        logger.error(f"Error in process_realtime_whatsapp: {e}", exc_info=True)
 
 
 # ==========================================
@@ -158,9 +237,8 @@ async def telegram_webhook(request: Request):
         cb_data = cb.get("data", "")
         chat_id = cb.get("message", {}).get("chat", {}).get("id")
 
-        # Check authentication for buttons
-        if chat_id not in authenticated_chats:
-            await send_telegram_ack(cb_id, "Access Denied. Pehle password enter karein.")
+        if not is_session_active(chat_id):
+            await send_telegram_ack(cb_id, "Session expired. Kripya pehle password enter karein.")
             return Response(status_code=200)
 
         try:
@@ -180,7 +258,7 @@ async def telegram_webhook(request: Request):
 
                 success = False
                 if action.platform.lower() == "whatsapp":
-                    success = await send_whatsapp_reply(action.recipient, action.proposed_text)
+                    success = await send_whatsapp_reply(str(action.recipient).strip(), action.proposed_text)
                 elif action.platform.lower() == "email":
                     success = await send_email_reply(
                         to_email=action.recipient,
@@ -226,25 +304,32 @@ async def telegram_webhook(request: Request):
         chat_id = data["message"]["chat"]["id"]
         user_text = data["message"]["text"].strip()
 
-        # ==========================================
-        # PASSWORD AUTHENTICATION GATE
-        # ==========================================
-        if chat_id not in authenticated_chats:
+        # Password authentication & Auto-lock Gate
+        if not is_session_active(chat_id):
             if user_text == BOT_PASSWORD:
-                authenticated_chats.add(chat_id)
+                authenticated_sessions[chat_id] = time.time()
                 welcome = (
                     "🔓 **Access Granted!**\n\n"
-                    "Aapka session authenticate ho chuka hai. Niche diye gaye menu se actions control karein:"
+                    f"Aapka session authenticate ho gaya hai (Auto-lock: {SESSION_TIMEOUT_SECONDS // 3600}h inactivity).\n"
+                    "Niche diye gaye menu se control karein:"
                 )
                 await send_telegram_message(chat_id, welcome, reply_markup=get_main_menu_keyboard())
                 return Response(status_code=200)
             else:
                 lock_msg = (
-                    "🔒 **Access Denied / Protected Bot**\n\n"
-                    "Ye ek private bot hai. Use karne ke liye kripya **password** type karke send karein."
+                    "🔒 **Session Locked / Access Denied**\n\n"
+                    "Aapka session lock ho chuka hai ya unauthorized access hai.\n"
+                    "Use karne ke liye **password** type karke send karein."
                 )
                 await send_telegram_message(chat_id, lock_msg)
                 return Response(status_code=200)
+
+        # Manual Lock Command
+        if user_text in ["/lock", "🔒 Lock"]:
+            if chat_id in authenticated_sessions:
+                del authenticated_sessions[chat_id]
+            await send_telegram_message(chat_id, "🔒 Bot successfully lock kar diya gaya hai. Re-login ke liye password enter karein.")
+            return Response(status_code=200)
 
         # 1. Check if user is currently editing a draft
         editing_action = await get_editing_action()
@@ -336,7 +421,7 @@ async def telegram_webhook(request: Request):
             await send_telegram_message(chat_id, reply)
             return Response(status_code=200)
 
-        # 7. Run Full Digest On-Demand
+        # 7. Run Full Digest On-Demand (Manual Trigger)
         elif user_text in ["🚀 Run Full Digest", "/digest"]:
             await send_telegram_message(chat_id, "⏳ Pipeline trigger ho rahi hai...")
             asyncio.create_task(dispatch_full_digest())
@@ -345,6 +430,29 @@ async def telegram_webhook(request: Request):
         # 8. Natural Language User Text / Custom Command Processing
         else:
             await send_telegram_message(chat_id, "🧠 Processing...")
+            lower_query = user_text.lower()
+
+            action_triggers = ["send", "bhej", "reply", "draft", "likh", "write"]
+            is_action_command = any(word in lower_query for word in action_triggers)
+
+            if not is_action_command:
+                if any(k in lower_query for k in ["whatsapp", "wa ", "whats app"]):
+                    chats = await get_recent_messages_by_platform("whatsapp", limit=7)
+                    analysis = await check_important_whatsapp_summary(chats)
+                    await send_telegram_message(chat_id, analysis)
+                    return Response(status_code=200)
+
+                email_check_keywords = [
+                    "important mail", "koi mail", "check mail", "koi important",
+                    "new email", "important email", "mails check", "mail check",
+                    "aaj ka mail", "inbox", "mails"
+                ]
+                if any(k in lower_query for k in email_check_keywords):
+                    emails = await fetch_latest_emails(limit=7)
+                    analysis = await check_important_emails_summary(emails)
+                    await send_telegram_message(chat_id, analysis)
+                    return Response(status_code=200)
+
             result = await process_user_chat_command(user_text)
 
             if result.get("intent") == "chat":
@@ -377,7 +485,7 @@ async def telegram_webhook(request: Request):
 
 
 # ==========================================
-# 3. UNIFIED AI DIGEST PIPELINE
+# 3. UNIFIED AI DIGEST PIPELINE (Manual Only)
 # ==========================================
 
 async def dispatch_full_digest():
