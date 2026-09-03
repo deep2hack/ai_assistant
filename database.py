@@ -1,5 +1,5 @@
-from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, select
+from datetime import datetime, time
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -31,7 +31,6 @@ class PendingAction(Base):
     draft_body = Column(Text, nullable=False)
     status = Column(String(50), default="pending")
 
-    # Property taaki main.py proposed_text ya draft_body dono use kar sake
     @property
     def proposed_text(self):
         return self.draft_body
@@ -72,7 +71,6 @@ async def mark_messages_as_summarized(message_ids: list[int]):
         await session.commit()
 
 
-# Alias for main.py import compatibility
 mark_messages_summarized = mark_messages_as_summarized
 
 
@@ -92,7 +90,6 @@ async def create_pending_action(
         return action.id
 
 
-# Alias for main.py import compatibility
 async def save_pending_action(platform: str, recipient: str, proposed_text: str):
     return await create_pending_action(
         platform=platform, recipient=recipient, draft_body=proposed_text
@@ -140,3 +137,55 @@ async def get_editing_action():
             .order_by(PendingAction.id.desc())
         )
         return result.scalars().first()
+
+
+# --- New Query Helpers for Bot Options ---
+
+
+async def get_recent_messages_by_platform(platform: str, limit: int = 5):
+    """Fetches the latest N messages for a specific platform (e.g., 'email' or 'whatsapp')."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(MessageRecord)
+            .where(func.lower(MessageRecord.platform) == platform.lower())
+            .order_by(MessageRecord.id.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return result.scalars().all()
+
+
+async def get_latest_messages_all(limit: int = 5):
+    """Fetches the latest N incoming messages across all platforms."""
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(MessageRecord)
+            .order_by(MessageRecord.id.desc())
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        return result.scalars().all()
+
+
+async def get_todays_stats():
+    """Returns today's message counts grouped by platform, and total pending approvals."""
+    async with AsyncSessionLocal() as session:
+        today_start = datetime.combine(datetime.utcnow().date(), time.min)
+
+        # Count messages received today grouped by platform
+        msg_stmt = (
+            select(MessageRecord.platform, func.count(MessageRecord.id))
+            .where(MessageRecord.timestamp >= today_start)
+            .group_by(MessageRecord.platform)
+        )
+        msg_result = await session.execute(msg_stmt)
+        platform_counts = msg_result.all()
+
+        # Count pending approvals
+        action_stmt = select(func.count(PendingAction.id)).where(
+            func.lower(PendingAction.status) == "pending"
+        )
+        action_result = await session.execute(action_stmt)
+        pending_count = action_result.scalar() or 0
+
+        return platform_counts, pending_count

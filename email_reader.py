@@ -12,15 +12,17 @@ load_dotenv()
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
+# List of promotional/automated senders to filter out
 IGNORED_SENDERS = [
     "noreply", "no-reply", "marketing", "notifications", "digest",
     "promotions", "newsletter", "suno.com", "zomato.com", "canva.com",
-    "quora.com", "turboscribe.ai", "adobe.com", "google.com", 
+    "quora.com", "turboscribe.ai", "adobe.com", "google.com",
     "fabricspa.com", "uber.com", "inshot.com"
 ]
 
 
 def clean_header_text(header_value: str) -> str:
+    """Decodes MIME encoded headers (Subject, From, etc.)."""
     if not header_value:
         return ""
     decoded_fragments = decode_header(header_value)
@@ -34,7 +36,7 @@ def clean_header_text(header_value: str) -> str:
 
 
 def extract_body_from_email(msg: Message) -> str:
-    """Extracts clean plain text and strictly trims it to prevent token explosion."""
+    """Extracts clean plain text from multipart or HTML emails and limits length."""
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -52,7 +54,6 @@ def extract_body_from_email(msg: Message) -> str:
                 payload = part.get_payload(decode=True)
                 if payload:
                     html = payload.decode("utf-8", errors="ignore")
-                    # Remove HTML tags safely
                     soup = BeautifulSoup(html, "html.parser")
                     body = soup.get_text(separator=" ", strip=True)
     else:
@@ -60,7 +61,7 @@ def extract_body_from_email(msg: Message) -> str:
         if payload:
             body = payload.decode("utf-8", errors="ignore")
 
-    # Strict token safety: Trim body to first 800 characters
+    # Clean whitespace & trim to prevent token limits
     body = " ".join(body.split())
     if len(body) > 800:
         body = body[:800] + "..."
@@ -68,6 +69,7 @@ def extract_body_from_email(msg: Message) -> str:
 
 
 async def check_new_emails(limit: int = 10) -> list[dict]:
+    """Scans and saves unread (UNSEEN) emails to database for digest processing."""
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         print("Missing GMAIL_USER or GMAIL_APP_PASSWORD in .env")
         return []
@@ -81,7 +83,6 @@ async def check_new_emails(limit: int = 10) -> list[dict]:
 
         status, response = mail.search(None, "UNSEEN")
         if status != "OK" or not response[0]:
-            print("No new unread emails found.")
             mail.logout()
             return []
 
@@ -102,7 +103,7 @@ async def check_new_emails(limit: int = 10) -> list[dict]:
                     else:
                         sender_email = sender.strip()
 
-                    # Drop marketing mails
+                    # Drop promotional/automated emails
                     if any(ignored in sender_email.lower() for ignored in IGNORED_SENDERS):
                         print(f"⏩ Dropped promotional email from: {sender_email}")
                         continue
@@ -117,6 +118,71 @@ async def check_new_emails(limit: int = 10) -> list[dict]:
 
         mail.logout()
     except Exception as e:
-        print(f"Error fetching emails: {e}")
+        print(f"Error fetching new unread emails: {e}")
+
+    return collected_emails
+
+
+async def fetch_latest_emails(limit: int = 5) -> list[dict]:
+    """Fetches latest N emails (read + unread) directly from inbox for quick preview."""
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        return []
+
+    collected_emails = []
+
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        # readonly=True taaki fetch karte waqt email status read mark na ho
+        mail.select("INBOX", readonly=True)
+
+        status, response = mail.search(None, "ALL")
+        if status != "OK" or not response[0]:
+            mail.logout()
+            return []
+
+        all_ids = response[0].split()
+        # Scan extra emails to ensure we get required non-spam messages
+        scan_ids = all_ids[-max(limit * 4, 20):]
+        scan_ids.reverse()
+
+        for m_id in scan_ids:
+            res_status, data = mail.fetch(m_id, "(RFC822)")
+            if res_status != "OK":
+                continue
+
+            for part in data:
+                if isinstance(part, tuple):
+                    msg = email.message_from_bytes(part[1])
+
+                    sender = msg.get("From", "Unknown")
+                    if "<" in sender and ">" in sender:
+                        sender_email = sender.split("<")[1].split(">")[0].strip()
+                    else:
+                        sender_email = sender.strip()
+
+                    # Skip promotional/automated senders
+                    if any(ignored in sender_email.lower() for ignored in IGNORED_SENDERS):
+                        continue
+
+                    subject = clean_header_text(msg.get("Subject", "No Subject"))
+                    body = extract_body_from_email(msg)
+                    snippet = body[:120].replace("\n", " ")
+
+                    collected_emails.append({
+                        "sender": sender_email,
+                        "subject": subject,
+                        "snippet": snippet
+                    })
+
+                    if len(collected_emails) >= limit:
+                        break
+
+            if len(collected_emails) >= limit:
+                break
+
+        mail.logout()
+    except Exception as e:
+        print(f"Error fetching latest inbox emails: {e}")
 
     return collected_emails
