@@ -5,21 +5,18 @@ from google import genai
 
 load_dotenv()
 
-# GEMINI_API_KEY .env se load hoga
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 async def summarize_messages(messages: list) -> str:
-    """Generate an executive bullet-point summary of unread messages."""
+    """Generate an executive bullet-point summary of incoming messages."""
     if not messages:
         return "No new messages."
 
     if not client:
         return "⚠️ GEMINI_API_KEY is not configured in .env."
 
-    # Format messages for the prompt
     content_lines = []
     for m in messages:
         content_lines.append(f"- [{m.platform.upper()}] From: {m.sender} | Text: {m.content}")
@@ -51,7 +48,11 @@ Keep it strictly factual and concise.
 
 
 async def generate_draft_replies(messages: list) -> list[dict]:
-    """Generate suggested draft replies for messages that require a response."""
+    """
+    Classifies incoming messages into:
+    1. Safe auto-replies (low risk routine messages) -> can_auto_reply: True
+    2. High-risk decisions requiring human review -> can_auto_reply: False
+    """
     if not messages or not client:
         return []
 
@@ -63,21 +64,34 @@ async def generate_draft_replies(messages: list) -> list[dict]:
     formatted_input = "\n".join(content_lines)
 
     prompt = f"""
-You are an executive assistant drafting quick, polite, and professional replies to incoming messages.
+You are an executive AI assistant managing client communications across WhatsApp and Email.
+Draft an appropriate professional reply for each message, and decide whether it is safe to AUTO-REPLY without human intervention.
+
+CRITERIA FOR AUTO-REPLY (can_auto_reply: true):
+- Routine greetings ("Hi", "Hello", "Good morning", "Hope you're well")
+- Simple acknowledgments ("Received", "Thank you", "Noted", "Will check", "Okay")
+- Standard receipt confirmations
+- General availability checks without commitments ("Are you free to talk later?")
+
+CRITERIA FOR HUMAN REVIEW (can_auto_reply: false):
+- Financials, pricing, quotes, invoices, payment queries, discounts
+- Project commitments, deadlines, contracts, scope discussions
+- Rescheduling or confirming formal client meetings
+- Complaints, escalations, critical bugs, or sensitive discussions
+- Any ambiguous message where an incorrect reply causes business risk
 
 MESSAGES:
 {formatted_input}
 
 TASK:
-Identify each message that requires an acknowledgement, answer, or reply. 
-Return ONLY a valid JSON list of objects. Do not include markdown code block backticks (like ```json), just the raw JSON.
-
-JSON schema per item:
+Return ONLY a valid JSON list of objects without markdown block formatting (no ```json):
 [
   {{
     "platform": "whatsapp",
     "recipient": "sender_phone_or_email",
-    "proposed_reply": "drafted reply text here"
+    "proposed_reply": "drafted reply text",
+    "can_auto_reply": true,
+    "intent_reason": "Routine greeting or acknowledgment"
   }}
 ]
 """
@@ -89,17 +103,19 @@ JSON schema per item:
         )
         raw_text = response.text.strip()
 
-        # Clean code block backticks if returned by the model
+        # Clean code block backticks if present
         if raw_text.startswith("```"):
-            raw_text = raw_text.strip("`").replace("json\n", "", 1).strip()
+            raw_text = raw_text.strip("`")
+            if raw_text.startswith("json\n"):
+                raw_text = raw_text[5:]
+            raw_text = raw_text.strip()
 
         drafts = json.loads(raw_text)
         if isinstance(drafts, list):
             return drafts
         return []
     except Exception as e:
-        print(f"Error generating draft replies: {e}")
-        # Fallback empty list so pipeline doesn't crash
+        print(f"Error classifying and drafting replies: {e}")
         return []
 
 

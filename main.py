@@ -22,6 +22,7 @@ from telegram_bot import (
     send_action_card,
 )
 from reply_sender import send_whatsapp_reply, send_email_reply
+from email_reader import check_new_emails
 
 load_dotenv()
 
@@ -183,37 +184,73 @@ async def telegram_webhook(request: Request):
 
 
 # ==========================================
-# 3. AI DIGEST & PIPELINE DISPATCHER
+# 3. UNIFIED AI DIGEST & AUTONOMOUS DISPATCHER
 # ==========================================
 
 async def dispatch_full_digest():
-    print("Running executive digest pipeline...")
+    print("Running unified executive digest pipeline...")
+
+    # Step 1: Scan and ingest latest unread emails
+    await check_new_emails(limit=5)
+
+    # Step 2: Fetch unsummarized messages across both channels
     unsummarized = await fetch_unsummarized_messages()
     if not unsummarized:
-        print("No new messages found to summarize.")
+        print("No new messages found across WhatsApp or Email.")
         return
 
-    # Generate Markdown Summary
+    # Step 3: Consolidated executive briefing to Telegram
     summary_text = await summarize_messages(unsummarized)
     await send_telegram_message(TELEGRAM_CHAT_ID, summary_text)
 
-    # Generate AI Draft Replies
+    # Step 4: Classify and process drafts (Auto vs Manual)
     drafts = await generate_draft_replies(unsummarized)
     for draft in drafts:
-        action_id = await save_pending_action(
-            platform=draft.get("platform", "whatsapp"),
-            recipient=draft.get("recipient"),
-            proposed_text=draft.get("proposed_reply", ""),
-        )
-        await send_action_card(
-            chat_id=TELEGRAM_CHAT_ID,
-            action_id=action_id,
-            platform=draft.get("platform", "whatsapp"),
-            recipient=draft.get("recipient"),
-            proposed_text=draft.get("proposed_reply", ""),
-        )
+        platform = draft.get("platform", "whatsapp").lower()
+        recipient = draft.get("recipient")
+        reply_text = draft.get("proposed_reply", "")
+        can_auto = draft.get("can_auto_reply", False)
+        reason = draft.get("intent_reason", "Routine acknowledgment")
 
-    # Mark all processed messages as summarized
+        if can_auto:
+            # === ZERO-TOUCH AUTONOMOUS DISPATCH ===
+            sent = False
+            if platform == "whatsapp":
+                sent = await send_whatsapp_reply(recipient, reply_text)
+            elif platform == "email":
+                sent = await send_email_reply(
+                    to_email=recipient,
+                    subject="Re: Quick Update",
+                    body=reply_text,
+                )
+
+            if sent:
+                action_id = await save_pending_action(platform, recipient, reply_text)
+                await update_pending_action_status(action_id, "EXECUTED")
+
+                auto_note = (
+                    f"⚡ **Auto-Replied ({platform.upper()})**\n"
+                    f"**To:** `{recipient}`\n"
+                    f"**Reason:** {reason}\n"
+                    f"**Message:** _{reply_text}_"
+                )
+                await send_telegram_message(TELEGRAM_CHAT_ID, auto_note)
+            else:
+                # Fallback to manual card if direct auto-dispatch fails
+                can_auto = False
+
+        if not can_auto:
+            # === MANUAL HUMAN REVIEW REQUIRED ===
+            action_id = await save_pending_action(platform, recipient, reply_text)
+            await send_action_card(
+                chat_id=TELEGRAM_CHAT_ID,
+                action_id=action_id,
+                platform=platform,
+                recipient=recipient,
+                proposed_text=reply_text,
+            )
+
+    # Step 5: Mark processed records as summarized
     msg_ids = [m.id for m in unsummarized]
     await mark_messages_summarized(msg_ids)
-    print(f"Digest complete. Processed {len(msg_ids)} messages.")
+    print(f"Unified digest complete. Processed {len(msg_ids)} message(s).")
