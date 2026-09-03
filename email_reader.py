@@ -1,10 +1,10 @@
-import email
-from email.header import decode_header
-import imaplib
 import os
-from bs4 import BeautifulSoup
-from database import save_message
+import imaplib
+import email
+from email.message import Message
+from email.header import decode_header
 from dotenv import load_dotenv
+from database import save_message
 
 load_dotenv()
 
@@ -12,73 +12,100 @@ GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 
-def clean_html(html_text: str) -> str:
-    soup = BeautifulSoup(html_text, "html.parser")
-    return soup.get_text(separator=" ", strip=True)
+def clean_header_text(header_value: str) -> str:
+    """Decodes MIME encoded header strings safely into readable text."""
+    if not header_value:
+        return ""
+    decoded_fragments = decode_header(header_value)
+    text_parts = []
+    for fragment, encoding in decoded_fragments:
+        if isinstance(fragment, bytes):
+            text_parts.append(fragment.decode(encoding or "utf-8", errors="ignore"))
+        else:
+            text_parts.append(str(fragment))
+    return "".join(text_parts).strip()
 
 
-async def check_new_emails(limit: int = 5):
+def extract_body_from_email(msg: Message) -> str:
+    """Extracts plain text body from single-part or multipart emails."""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            content_disposition = str(part.get("Content-Disposition", ""))
+            if content_type == "text/plain" and "attachment" not in content_disposition:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body = payload.decode("utf-8", errors="ignore")
+                    break
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body = payload.decode("utf-8", errors="ignore")
+    return body.strip()
+
+
+async def check_new_emails(limit: int = 5) -> list[dict]:
+    """
+    Connects to Gmail via IMAP SSL, fetches the latest unread emails (default 5),
+    saves them to SQLite, and returns a list of processed items.
+    """
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        print("Gmail credentials missing in .env")
-        return 0
+        print("Missing GMAIL_USER or GMAIL_APP_PASSWORD in .env")
+        return []
 
-    print(f"Connecting to Gmail for {GMAIL_USER}...")
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
-    mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-    mail.select("INBOX")
+    collected_emails = []
 
-    # Sirf Unread (UNSEEN) emails search karega
-    status, messages = mail.search(None, "UNSEEN")
-    mail_ids = messages[0].split()
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        mail.select("INBOX")
 
-    if not mail_ids:
-        print("Koi naya unread email nahi mila.")
-        mail.logout()
-        return 0
+        status, response = mail.search(None, "UNSEEN")
+        if status != "OK" or not response[0]:
+            print("No new unread emails found in inbox.")
+            mail.logout()
+            return []
 
-    print(f"Total {len(mail_ids)} unread emails mile. Processing latest {limit}...")
+        # Sirf aakhiri latest N emails pick karein
+        mail_ids = response[0].split()[-limit:]
+        print(f"Fetching latest {len(mail_ids)} unread email(s)...")
 
-    # Sirf latest 'limit' emails process karega
-    for mail_id in mail_ids[-limit:]:
-        _, msg_data = mail.fetch(mail_id, "(RFC822)")
-        for response_part in msg_data:
-            if isinstance(response_part, tuple):
-                msg = email.message_from_bytes(response_part[1])
+        for m_id in mail_ids:
+            res_status, data = mail.fetch(m_id, "(RFC822)")
+            if res_status != "OK":
+                continue
 
-                # Decode Subject
-                subject_header = decode_header(msg.get("Subject", "No Subject"))[0]
-                subject = subject_header[0]
-                if isinstance(subject, bytes):
-                    subject = subject.decode(
-                        subject_header[1] or "utf-8", errors="ignore"
+            for part in data:
+                if isinstance(part, tuple):
+                    msg = email.message_from_bytes(part[1])
+
+                    subject = clean_header_text(msg.get("Subject", "No Subject"))
+
+                    sender = msg.get("From", "Unknown")
+                    if "<" in sender and ">" in sender:
+                        sender_email = sender.split("<")[1].split(">")[0].strip()
+                    else:
+                        sender_email = sender.strip()
+
+                    body = extract_body_from_email(msg)
+                    content = f"Subject: {subject}\n\n{body}"
+
+                    await save_message(
+                        platform="email",
+                        sender=sender_email,
+                        content=content
                     )
 
-                sender = msg.get("From", "Unknown Sender")
+                    collected_emails.append({
+                        "sender": sender_email,
+                        "subject": subject,
+                        "body": body
+                    })
+                    print(f"✅ Saved unread email from: {sender_email} | Subject: {subject}")
 
-                # Extract Body
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        content_type = part.get_content_type()
-                        if content_type == "text/plain":
-                            body = part.get_payload(decode=True).decode(
-                                errors="ignore"
-                            )
-                            break
-                        elif content_type == "text/html" and not body:
-                            raw_html = part.get_payload(decode=True).decode(
-                                errors="ignore"
-                            )
-                            body = clean_html(raw_html)
-                else:
-                    body = msg.get_payload(decode=True).decode(errors="ignore")
+        mail.logout()
+    except Exception as e:
+        print(f"Error fetching emails via IMAP: {e}")
 
-                # Database me format karke save
-                content_payload = f"Subject: {subject}\nSnippet: {body[:350].strip()}"
-                await save_message(
-                    platform="email", sender=sender, content=content_payload
-                )
-                print(f"Saved Email: {subject[:40]}... from {sender}")
-
-    mail.logout()
-    return len(mail_ids)
+    return collected_emails
