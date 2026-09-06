@@ -56,6 +56,9 @@ SESSION_TIMEOUT_SECONDS = int(os.getenv("SESSION_TIMEOUT_SECONDS", "7200"))
 # Stores chat_id -> last_activity_timestamp (Unix epoch)
 authenticated_sessions: dict[int, float] = {}
 
+# Emergency Kill Switch (Software freeze)
+EMERGENCY_HALT: bool = False
+
 
 def is_session_active(chat_id: int) -> bool:
     """Checks if chat session is verified and not expired."""
@@ -93,11 +96,17 @@ app = FastAPI(title="AI Executive Assistant", lifespan=lifespan)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "app": "AI Executive Assistant"}
+    return {
+        "status": "ok",
+        "app": "AI Executive Assistant",
+        "emergency_halt": EMERGENCY_HALT,
+    }
 
 
 @app.post("/digest/run")
 async def trigger_digest(background_tasks: BackgroundTasks):
+    if EMERGENCY_HALT:
+        return {"status": "rejected", "detail": "System is in EMERGENCY_HALT mode."}
     background_tasks.add_task(dispatch_full_digest)
     return {"status": "accepted", "detail": "Pipeline dispatched in background"}
 
@@ -120,6 +129,11 @@ async def verify_whatsapp_webhook(
 
 @app.post("/webhook/whatsapp")
 async def receive_whatsapp_message(request: Request, background_tasks: BackgroundTasks):
+    global EMERGENCY_HALT
+    if EMERGENCY_HALT:
+        logger.warning("Incoming WhatsApp message dropped: EMERGENCY_HALT is active.")
+        return Response(content="SYSTEM_HALTED", status_code=200)
+
     try:
         data = await request.json()
         entries = data.get("entry", [])
@@ -135,7 +149,7 @@ async def receive_whatsapp_message(request: Request, background_tasks: Backgroun
                         if sender_name and body:
                             # 1. Database me Clean Display Name / Phone save karein
                             await save_message("whatsapp", sender_name, body)
-                            logger.info(f"Saved WhatsApp from: {sender_name}")
+                            logger.info(f"Saved WhatsApp from: {sender_name} (raw_id: {raw_id})")
 
                             # 2. Structured message object
                             msg_obj = SimpleNamespace(
@@ -164,6 +178,11 @@ async def process_realtime_whatsapp(saved_msg, display_name: str, delivery_targe
     Evaluates and automatically replies to incoming WhatsApp messages
     with zero-to-low human engagement.
     """
+    global EMERGENCY_HALT
+    if EMERGENCY_HALT:
+        logger.warning("process_realtime_whatsapp aborted: EMERGENCY_HALT is active.")
+        return
+
     try:
         drafts = await generate_draft_replies([saved_msg])
         if not drafts:
@@ -224,6 +243,8 @@ async def process_realtime_whatsapp(saved_msg, display_name: str, delivery_targe
 
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
+    global EMERGENCY_HALT
+
     try:
         data = await request.json()
     except Exception:
@@ -238,6 +259,11 @@ async def telegram_webhook(request: Request):
 
         if not is_session_active(chat_id):
             await send_telegram_ack(cb_id, "Session expired. Kripya pehle password enter karein.")
+            return Response(status_code=200)
+
+        # Check Emergency Stop before executing action
+        if EMERGENCY_HALT and cb_data.startswith("approve_"):
+            await send_telegram_ack(cb_id, "🚨 System halted! Unlock with /resume first.")
             return Response(status_code=200)
 
         try:
@@ -310,7 +336,7 @@ async def telegram_webhook(request: Request):
                 welcome = (
                     "🔓 **Access Granted!**\n\n"
                     f"Aapka session authenticate ho gaya hai (Auto-lock: {SESSION_TIMEOUT_SECONDS // 3600}h inactivity).\n"
-                    "Niche diye gaye menu se control karein:"
+                    "Niche diye gaye menu se control karein ya `/stop` se kill switch activate karein."
                 )
                 await send_telegram_message(chat_id, welcome, reply_markup=get_main_menu_keyboard())
                 return Response(status_code=200)
@@ -323,11 +349,51 @@ async def telegram_webhook(request: Request):
                 await send_telegram_message(chat_id, lock_msg)
                 return Response(status_code=200)
 
+        # ----------------------------------------------------
+        # EMERGENCY KILL SWITCH & SYSTEM CONTROLS
+        # ----------------------------------------------------
+        if user_text in ["/stop", "/kill", "/halt", "🛑 Stop Bot"]:
+            EMERGENCY_HALT = True
+            halt_msg = (
+                "🚨 **EMERGENCY KILL SWITCH ACTIVATED** 🚨\n\n"
+                "• All autonomous replies are **FROZEN**.\n"
+                "• Incoming WhatsApp message triggers are **BLOCKED**.\n"
+                "• All outbound dispatching is **PAUSED**.\n\n"
+                "System ko unfreeze karne ke liye `/resume` type karein."
+            )
+            await send_telegram_message(chat_id, halt_msg)
+            return Response(status_code=200)
+
+        if user_text in ["/resume", "/start_ai"]:
+            EMERGENCY_HALT = False
+            resume_msg = (
+                "✅ **System Resumed**\n\n"
+                "Autonomous message monitoring and draft reply dispatches are now **ACTIVE**."
+            )
+            await send_telegram_message(chat_id, resume_msg)
+            return Response(status_code=200)
+
+        if user_text == "/hardkill":
+            await send_telegram_message(
+                chat_id, 
+                "⚠️ **Hard Kill Triggered**\nRebooting backend process immediately via PM2..."
+            )
+            # Exits process with non-zero exit code so PM2 reloads the instance cleanly
+            os._exit(1)
+
         # Manual Lock Command
         if user_text in ["/lock", "🔒 Lock"]:
             if chat_id in authenticated_sessions:
                 del authenticated_sessions[chat_id]
             await send_telegram_message(chat_id, "🔒 Bot successfully lock kar diya gaya hai. Re-login ke liye password enter karein.")
+            return Response(status_code=200)
+
+        # Check if halted during conversational use
+        if EMERGENCY_HALT:
+            await send_telegram_message(
+                chat_id, 
+                "⚠️ System currently halted due to kill switch. To resume operations, send `/resume`."
+            )
             return Response(status_code=200)
 
         # 1. Check if user is currently editing a draft
@@ -355,7 +421,8 @@ async def telegram_webhook(request: Request):
         if user_text in ["/start", "/menu"]:
             welcome = (
                 "👋 **Executive Assistant Control Panel**\n\n"
-                "Niche diye gaye options par tap karein ya seedhe koi bhi message/instruction type karein:"
+                "Niche diye gaye options par tap karein ya seedhe koi bhi message/instruction type karein:\n"
+                "(Emergency Stop ke liye `/stop` bhejein)"
             )
             await send_telegram_message(chat_id, welcome, reply_markup=get_main_menu_keyboard())
             return Response(status_code=200)
@@ -370,6 +437,7 @@ async def telegram_webhook(request: Request):
                 for platform, count in counts:
                     stats_msg += f"• **{platform.upper()}:** {count} message(s)\n"
             stats_msg += f"\n⚠️ **Pending Approvals:** {pending}"
+            stats_msg += f"\n🔒 **Kill Switch Status:** {'🚨 HALTED' if EMERGENCY_HALT else '✅ ACTIVE'}"
             await send_telegram_message(chat_id, stats_msg)
             return Response(status_code=200)
 
@@ -488,6 +556,11 @@ async def telegram_webhook(request: Request):
 # ==========================================
 
 async def dispatch_full_digest():
+    global EMERGENCY_HALT
+    if EMERGENCY_HALT:
+        logger.warning("dispatch_full_digest aborted: EMERGENCY_HALT is active.")
+        return
+
     logger.info("Running unified executive digest pipeline...")
 
     try:
@@ -503,6 +576,10 @@ async def dispatch_full_digest():
 
         drafts = await generate_draft_replies(unsummarized)
         for draft in drafts:
+            if EMERGENCY_HALT:
+                logger.warning("Digest draft loop aborted midway due to EMERGENCY_HALT.")
+                break
+
             platform = draft.get("platform", "whatsapp").lower()
             recipient = draft.get("recipient")
             reply_text = draft.get("proposed_reply", "")
