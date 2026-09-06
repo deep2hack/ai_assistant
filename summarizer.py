@@ -8,7 +8,9 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-MODEL_NAME = "qwen/qwen3.8-27b"
+
+# Production-stable model with high throughput on Groq
+MODEL_NAME = "llama-3.3-70b-versatile"
 
 
 def extract_json_array(text: str) -> list:
@@ -99,7 +101,6 @@ async def summarize_messages(messages: list) -> str:
 
     content_lines = []
     for m in messages:
-        # Strict Token Safety: Max 500 characters per message
         trimmed_content = (m.content[:500] + "...") if len(m.content) > 500 else m.content
         content_lines.append(f"- [{m.platform.upper()}] From: {m.sender} | Text: {trimmed_content}")
     formatted_input = "\n".join(content_lines)
@@ -115,17 +116,18 @@ OUTPUT FORMAT:
 - Group by sender or urgent action items.
 - Mention key points clearly with bold tags.
 - Highlight any pending tasks, meetings, or critical questions.
-Keep it strictly factual and concise.
+Keep it strictly factual, concise, and under 250 words.
 """
 
     try:
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a concise executive assistant. Do not output thinking tokens."},
+                {"role": "system", "content": "You are a concise executive assistant. Never output thinking tags."},
                 {"role": "user", "content": prompt}
             ],
             model=MODEL_NAME,
-            temperature=0.3,
+            temperature=0.2,
+            max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         return re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
@@ -137,16 +139,15 @@ Keep it strictly factual and concise.
 async def generate_draft_replies(messages: list) -> list[dict]:
     """
     Classifies incoming messages into:
-    1. Safe auto-replies (low risk) -> can_auto_reply: True
-    2. High-risk decisions requiring review -> can_auto_reply: False
+    1. Safe auto-replies (low risk, greetings, common questions) -> can_auto_reply: True
+    2. High-risk decisions requiring human review -> can_auto_reply: False
     """
     if not messages or not client:
         return []
 
     content_lines = []
     for m in messages:
-        # Strict Token & Formatting Safety
-        safe_content = (m.content[:500] + "...") if len(m.content) > 500 else m.content
+        safe_content = (m.content[:400] + "...") if len(m.content) > 400 else m.content
         safe_content = safe_content.replace('"', "'").replace("\n", " ")
         content_lines.append(
             f'{{"id": {m.id}, "platform": "{m.platform}", "sender": "{m.sender}", "content": "{safe_content}"}}'
@@ -154,32 +155,34 @@ async def generate_draft_replies(messages: list) -> list[dict]:
     formatted_input = "\n".join(content_lines)
 
     prompt = f"""
-You are an executive AI assistant managing communications across WhatsApp and Email.
-Draft an appropriate professional reply for each message, and decide whether it is safe to AUTO-REPLY without human intervention.
+You are an autonomous executive AI assistant managing WhatsApp and Email communications.
+Draft an immediate, polite reply for each message and classify whether it can AUTO-REPLY directly.
 
-CRITERIA FOR AUTO-REPLY (can_auto_reply: true):
-- Routine greetings ("Hi", "Hello", "Good morning")
-- Simple acknowledgments ("Received", "Thank you", "Noted", "Okay")
-- Standard automated receipts/confirmations
+RULES FOR `can_auto_reply`:
+1. SET `can_auto_reply: true` FOR:
+   - Greetings (e.g., "Hi", "Hello", "Hyy", "Good morning", "Hey").
+   - Casual inquiries and check-ins (e.g., "How are you?", "What's up?", "How are u?").
+   - Routine acknowledgments ("Thanks", "Noted", "Okay", "Received").
+   - Simple clarification questions (e.g., "How many days?", "Can you tell me more?").
 
-CRITERIA FOR HUMAN REVIEW (can_auto_reply: false):
-- Financials, pricing, quotes, invoices, payment queries
-- Project commitments, deadlines, contracts, scope discussions
-- Rescheduling meetings or complaints/escalations
+2. SET `can_auto_reply: false` ONLY FOR:
+   - Financial transactions, final payment quotes, discounts, banking or money transfers.
+   - Sharing sensitive passwords, API keys, legal contracts, or signed agreements.
+   - Major project deadline commitments or formal disputes.
 
 MESSAGES:
 {formatted_input}
 
 TASK:
 Output ONLY a raw JSON array. No explanations, no markdown fences, no thinking tags.
-Example output format:
+Output schema:
 [
   {{
-    "platform": "email",
-    "recipient": "sender@domain.com",
-    "proposed_reply": "Hi, thanks for reaching out. Here is the requested update...",
-    "can_auto_reply": false,
-    "intent_reason": "Quotation and pricing requires human review"
+    "platform": "whatsapp",
+    "recipient": "sender",
+    "proposed_reply": "short polite response",
+    "can_auto_reply": true,
+    "intent_reason": "Routine greeting / casual check-in"
   }}
 ]
 """
@@ -187,11 +190,12 @@ Example output format:
     try:
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a JSON-only API. You output strictly valid raw JSON arrays without preamble or thinking steps."},
+                {"role": "system", "content": "You are a JSON-only API. Output strictly a valid raw JSON array without preamble."},
                 {"role": "user", "content": prompt}
             ],
             model=MODEL_NAME,
-            temperature=0.1,
+            temperature=0.2,
+            max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         drafts = extract_json_array(raw_text)
@@ -202,11 +206,7 @@ Example output format:
 
 
 async def process_user_chat_command(user_text: str) -> dict:
-    """
-    User ke typed message ko process karta hai:
-    - Normal queries/questions ka smart, concise jawab deta hai.
-    - Message/Email dispatch commands (e.g. 'X ko mail bhej do...') par structured action draft banata hai.
-    """
+    """Processes interactive commands from the Telegram dashboard."""
     if not client:
         return {"intent": "chat", "reply": "⚠️ GROQ_API_KEY configure nahi hai."}
 
@@ -243,6 +243,7 @@ Output strictly valid JSON with no preamble, markdown fences, or thinking tags.
             ],
             model=MODEL_NAME,
             temperature=0.2,
+            max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         result = extract_json_object(raw_text)
@@ -258,6 +259,7 @@ Output strictly valid JSON with no preamble, markdown fences, or thinking tags.
 
 
 generate_summary = summarize_messages
+
 
 async def check_important_emails_summary(emails: list) -> str:
     """Live inbox emails me se urgent/important identify karke brief deta hai."""
@@ -282,22 +284,25 @@ EMAILS:
 Respond in simple Hinglish or English:
 - If important emails exist, highlight who sent them and what urgent action is required.
 - If none are important, state that all recent emails are routine or non-urgent.
-Keep it under 3-4 bullet points.
+Keep it strictly under 3-4 concise bullet points.
 """
 
     try:
         completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a concise executive assistant."},
+                {"role": "system", "content": "You are a concise executive assistant. Do not use thinking tags."},
                 {"role": "user", "content": prompt}
             ],
             model=MODEL_NAME,
             temperature=0.2,
+            max_tokens=350,
         )
         raw = completion.choices[0].message.content.strip()
         return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     except Exception as e:
         return f"Error analyzing emails: {e}"
+
+
 async def check_important_whatsapp_summary(messages: list) -> str:
     """Recent WhatsApp messages me se urgent/actionable chats filter karta hai."""
     if not messages:
@@ -321,17 +326,18 @@ MESSAGES:
 Respond in clean Hinglish or English:
 - If urgent items exist, mention the sender and what action is needed.
 - If no urgent items exist, state that all recent WhatsApp messages are casual or routine.
-Keep it strictly under 3-4 bullet points.
+Keep it strictly under 3-4 concise bullet points.
 """
 
     try:
         completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a concise executive assistant."},
+                {"role": "system", "content": "You are a concise executive assistant. Do not use thinking tags."},
                 {"role": "user", "content": prompt}
             ],
             model=MODEL_NAME,
             temperature=0.2,
+            max_tokens=350,
         )
         raw = completion.choices[0].message.content.strip()
         return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
