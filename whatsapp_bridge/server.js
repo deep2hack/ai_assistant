@@ -8,7 +8,6 @@ app.use(express.json());
 
 const FASTAPI_WEBHOOK_URL = 'http://127.0.0.1:8000/webhook/whatsapp';
 
-// Track last incoming or addressed JID as reliable fallback
 let lastActiveJid = null;
 
 const client = new Client({
@@ -36,18 +35,26 @@ client.on('ready', () => {
     console.log('✅ WhatsApp Business Client authenticated and ready!');
 });
 
-// Use message_create so self-chats and incoming chats are captured reliably
+// Capture all incoming and created messages without throwing or dropping silently
 client.on('message_create', async (msg) => {
     try {
-        // Skip group messages
-        if (msg.from.includes('@g.us') || msg.to.includes('@g.us')) return;
+        console.log(`[RAW WA EVENT] from: ${msg.from} | to: ${msg.to} | fromMe: ${msg.fromMe} | body: ${msg.body}`);
 
-        // Skip messages dispatched by bot itself to avoid infinite feedback loops
-        if (msg.fromMe && !msg.to.includes(msg.from)) {
+        // Ignore group chats
+        if ((msg.from && msg.from.includes('@g.us')) || (msg.to && msg.to.includes('@g.us'))) {
             return;
         }
 
-        const effectiveSender = msg.fromMe ? msg.to : msg.from;
+        const body = (msg.body || '').trim();
+        if (!body) return;
+
+        // Determine destination target
+        let effectiveSender = msg.from;
+        if (msg.fromMe) {
+            // Outgoing self test message
+            effectiveSender = msg.to;
+        }
+
         lastActiveJid = effectiveSender;
 
         let displayName = null;
@@ -55,24 +62,21 @@ client.on('message_create', async (msg) => {
         try {
             const contact = await msg.getContact();
             if (contact) {
-                if (contact.name && contact.name.trim() !== '') {
+                if (contact.name && contact.name.trim()) {
                     displayName = contact.name.trim();
-                } else if (contact.pushname && contact.pushname.trim() !== '') {
+                } else if (contact.pushname && contact.pushname.trim()) {
                     displayName = contact.pushname.trim();
-                } else if (contact.number && contact.number.trim() !== '') {
+                } else if (contact.number && contact.number.trim()) {
                     displayName = `+${contact.number.trim()}`;
                 }
             }
-        } catch (contactErr) {
-            console.log('Contact resolution fallback triggered');
+        } catch (e) {
+            console.log('Contact name lookup skipped:', e.message);
         }
 
         if (!displayName) {
             displayName = effectiveSender;
         }
-
-        const body = msg.body;
-        if (!body || body.trim() === '') return;
 
         await axios.post(FASTAPI_WEBHOOK_URL, {
             entry: [{
@@ -106,23 +110,20 @@ app.post('/send-message', async (req, res) => {
     try {
         let chatId = recipient.toString().trim();
 
-        // Handle string targets like "Self" or contact names without numbers
         const digitsOnly = chatId.replace(/\D/g, '');
         if (chatId.toLowerCase() === 'self' || (!chatId.includes('@') && digitsOnly.length === 0)) {
             if (lastActiveJid) {
-                console.log(`Resolved target name "${chatId}" to last active JID: ${lastActiveJid}`);
+                console.log(`Resolved target "${chatId}" to lastActiveJid: ${lastActiveJid}`);
                 chatId = lastActiveJid;
             } else if (client.info && client.info.wid) {
                 chatId = client.info.wid._serialized;
-                console.log(`Resolved target name "${chatId}" to bot session JID: ${chatId}`);
+                console.log(`Resolved target "${chatId}" to client JID: ${chatId}`);
             } else {
                 return res.status(400).json({
-                    error: `Target "${chatId}" cannot be resolved. No prior incoming messages or active session ID found.`
+                    error: `Target "${chatId}" cannot be resolved. No active sender JID available.`
                 });
             }
-        } 
-        // Handle pure numbers (e.g. 10 digit Indian numbers or full international format)
-        else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
+        } else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
             if (digitsOnly.length === 10) {
                 chatId = `91${digitsOnly}@c.us`;
             } else {
