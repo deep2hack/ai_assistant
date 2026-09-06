@@ -8,7 +8,7 @@ app.use(express.json());
 
 const FASTAPI_WEBHOOK_URL = 'http://127.0.0.1:8000/webhook/whatsapp';
 
-// Track last incoming JID as reliable fallback for self/named actions
+// Track last incoming JID as a reliable fallback for Self/named triggers
 let lastActiveJid = null;
 
 const client = new Client({
@@ -36,11 +36,12 @@ client.on('ready', () => {
     console.log('✅ WhatsApp Business Client authenticated and ready!');
 });
 
-// Incoming message handler
+// Incoming message listener
 client.on('message', async (msg) => {
     try {
         if (msg.from.includes('@g.us')) return;
 
+        // Capture sender raw ID for future fallback
         lastActiveJid = msg.from;
         let displayName = null;
 
@@ -95,16 +96,23 @@ app.post('/send-message', async (req, res) => {
     try {
         let chatId = recipient.toString().trim();
 
-        // Agar recipient me "Self" ya name aa gaya ho jisme digits na ho
+        // 1. Resolve contact names like "Self" or text strings without digits
         const digitsOnly = chatId.replace(/\D/g, '');
         if (chatId.toLowerCase() === 'self' || (!chatId.includes('@') && digitsOnly.length === 0)) {
             if (lastActiveJid) {
-                console.log(`Recipient "${chatId}" resolved to last active target: ${lastActiveJid}`);
+                console.log(`Resolved target name "${chatId}" to last active JID: ${lastActiveJid}`);
                 chatId = lastActiveJid;
             } else if (client.info && client.info.wid) {
                 chatId = client.info.wid._serialized;
+                console.log(`Resolved target name "${chatId}" to bot self JID: ${chatId}`);
+            } else {
+                return res.status(400).json({ 
+                    error: `Target "${chatId}" cannot be resolved. No prior incoming messages or active session ID found.` 
+                });
             }
-        } else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
+        } 
+        // 2. Format regular numbers to standard WhatsApp format (@c.us)
+        else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
             if (digitsOnly.length === 10) {
                 chatId = `91${digitsOnly}@c.us`;
             } else {
@@ -112,16 +120,10 @@ app.post('/send-message', async (req, res) => {
             }
         }
 
-        console.log(`Sending message to target ChatId: ${chatId}`);
+        console.log(`Dispatching message to target ChatId: ${chatId}`);
 
-        // Try direct sendMessage first; fallback to getChatById
-        try {
-            await client.sendMessage(chatId, message);
-        } catch (sendErr) {
-            console.log(`Direct send failed (${sendErr.message}), trying getChatById...`);
-            const chat = await client.getChatById(chatId);
-            await chat.sendMessage(message);
-        }
+        // Direct send via client
+        await client.sendMessage(chatId, message);
 
         console.log(`Dispatched WhatsApp message successfully to ${chatId}`);
         return res.json({ status: 'success' });
