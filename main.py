@@ -133,11 +133,11 @@ async def receive_whatsapp_message(request: Request, background_tasks: Backgroun
                         body = msg.get("text", {}).get("body", "").strip()
 
                         if sender_name and body:
-                            # 1. Clean Display Name / Phone number database me save karein
+                            # 1. Database me Clean Display Name / Phone save karein
                             await save_message("whatsapp", sender_name, body)
                             logger.info(f"Saved WhatsApp from: {sender_name}")
 
-                            # 2. Structured message object for summarizer
+                            # 2. Structured message object
                             msg_obj = SimpleNamespace(
                                 id=None,
                                 platform="whatsapp",
