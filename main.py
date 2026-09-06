@@ -39,7 +39,8 @@ from telegram_bot import (
 from reply_sender import send_whatsapp_reply, send_email_reply
 from email_reader import check_new_emails, fetch_latest_emails
 
-load_dotenv()
+# Always reload environment freshly
+load_dotenv(override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -127,9 +128,7 @@ async def receive_whatsapp_message(request: Request, background_tasks: Backgroun
                 value = change.get("value", {})
                 for msg in value.get("messages", []):
                     if msg.get("type") == "text":
-                        # Display Name ya Phone Number (Database & UI ke liye)
                         sender_name = msg.get("from")
-                        # Raw WhatsApp JID (@lid ya @c.us - Reply dispatch ke liye)
                         raw_id = msg.get("raw_id", sender_name)
                         body = msg.get("text", {}).get("body", "").strip()
 
@@ -143,16 +142,16 @@ async def receive_whatsapp_message(request: Request, background_tasks: Backgroun
                                 id=None,
                                 platform="whatsapp",
                                 sender=sender_name,
-                                content=body
+                                content=body,
                             )
 
-                            # 3. Background autonomous processor (raw_id preserves delivery target)
+                            # 3. Background autonomous processor
                             background_tasks.add_task(
                                 process_realtime_whatsapp,
                                 msg_obj,
                                 sender_name,
                                 raw_id,
-                                body
+                                body,
                             )
     except Exception as e:
         logger.error(f"Error handling WhatsApp webhook: {e}")
@@ -187,7 +186,7 @@ async def process_realtime_whatsapp(saved_msg, display_name: str, delivery_targe
             if sent:
                 action_id = await save_pending_action("whatsapp", delivery_target, reply_text)
                 await update_pending_action_status(action_id, "EXECUTED")
-                if saved_msg.id:
+                if getattr(saved_msg, "id", None):
                     await mark_messages_summarized([saved_msg.id])
 
                 if TELEGRAM_CHAT_ID:
@@ -203,7 +202,7 @@ async def process_realtime_whatsapp(saved_msg, display_name: str, delivery_targe
 
         # Case B: Sensitive message fallback - Action Card sent to Telegram
         action_id = await save_pending_action("whatsapp", delivery_target, reply_text)
-        if saved_msg.id:
+        if getattr(saved_msg, "id", None):
             await mark_messages_summarized([saved_msg.id])
 
         if TELEGRAM_CHAT_ID:
@@ -445,7 +444,7 @@ async def telegram_webhook(request: Request):
                 email_check_keywords = [
                     "important mail", "koi mail", "check mail", "koi important",
                     "new email", "important email", "mails check", "mail check",
-                    "aaj ka mail", "inbox", "mails"
+                    "aaj ka mail", "inbox", "mails",
                 ]
                 if any(k in lower_query for k in email_check_keywords):
                     emails = await fetch_latest_emails(limit=7)
