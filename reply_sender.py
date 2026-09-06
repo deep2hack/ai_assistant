@@ -18,16 +18,17 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 async def send_whatsapp_reply(to_number: str, message_text: str) -> bool:
     """
     Dispatches a WhatsApp message directly via the local Node.js WhatsApp Web bridge.
-    Completely bypasses Meta Cloud API, verified recipient lists, and template constraints.
+    Uses an extended 45s timeout to prevent premature timeouts during Puppeteer browser execution.
     """
     payload = {
-        "recipient": to_number,
+        "recipient": str(to_number).strip(),
         "message": message_text
     }
 
-    async with httpx.AsyncClient() as client:
+    # Extended timeout so Puppeteer has enough time to resolve chats and dispatch
+    async with httpx.AsyncClient(timeout=45.0) as client:
         try:
-            res = await client.post(WHATSAPP_BRIDGE_URL, json=payload, timeout=15.0)
+            res = await client.post(WHATSAPP_BRIDGE_URL, json=payload)
             if res.status_code == 200:
                 print(f"WhatsApp message dispatched successfully to {to_number}")
                 return True

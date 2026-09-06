@@ -35,7 +35,7 @@ client.on('ready', () => {
     console.log('✅ WhatsApp Business Client authenticated and ready!');
 });
 
-// Capture all incoming and created messages without throwing or dropping silently
+// Capture all incoming and outgoing messages
 client.on('message_create', async (msg) => {
     try {
         console.log(`[RAW WA EVENT] from: ${msg.from} | to: ${msg.to} | fromMe: ${msg.fromMe} | body: ${msg.body}`);
@@ -48,10 +48,9 @@ client.on('message_create', async (msg) => {
         const body = (msg.body || '').trim();
         if (!body) return;
 
-        // Determine destination target
+        // Effective sender logic for self-test and incoming messages
         let effectiveSender = msg.from;
         if (msg.fromMe) {
-            // Outgoing self test message
             effectiveSender = msg.to;
         }
 
@@ -110,6 +109,7 @@ app.post('/send-message', async (req, res) => {
     try {
         let chatId = recipient.toString().trim();
 
+        // 1. Resolve 'Self' or contact names without digits
         const digitsOnly = chatId.replace(/\D/g, '');
         if (chatId.toLowerCase() === 'self' || (!chatId.includes('@') && digitsOnly.length === 0)) {
             if (lastActiveJid) {
@@ -123,7 +123,9 @@ app.post('/send-message', async (req, res) => {
                     error: `Target "${chatId}" cannot be resolved. No active sender JID available.`
                 });
             }
-        } else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
+        } 
+        // 2. Format plain digits to standard WhatsApp format
+        else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
             if (digitsOnly.length === 10) {
                 chatId = `91${digitsOnly}@c.us`;
             } else {
@@ -133,7 +135,18 @@ app.post('/send-message', async (req, res) => {
 
         console.log(`Dispatching message to target ChatId: ${chatId}`);
 
-        await client.sendMessage(chatId, message);
+        // Try direct sendMessage first; fallback to getChatById for LID routing
+        try {
+            await client.sendMessage(chatId, message);
+        } catch (sendErr) {
+            console.log(`Direct send failed (${sendErr.message}), attempting fallback via getChatById...`);
+            const chat = await client.getChatById(chatId);
+            if (chat && typeof chat.sendMessage === 'function') {
+                await chat.sendMessage(message);
+            } else {
+                throw sendErr;
+            }
+        }
 
         console.log(`Dispatched WhatsApp message successfully to ${chatId}`);
         return res.json({ status: 'success' });
