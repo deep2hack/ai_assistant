@@ -8,7 +8,7 @@ app.use(express.json());
 
 const FASTAPI_WEBHOOK_URL = 'http://127.0.0.1:8000/webhook/whatsapp';
 
-// Track last incoming JID as a reliable fallback for Self/named triggers
+// Track last incoming or addressed JID as reliable fallback
 let lastActiveJid = null;
 
 const client = new Client({
@@ -36,13 +36,20 @@ client.on('ready', () => {
     console.log('✅ WhatsApp Business Client authenticated and ready!');
 });
 
-// Incoming message listener
-client.on('message', async (msg) => {
+// Use message_create so self-chats and incoming chats are captured reliably
+client.on('message_create', async (msg) => {
     try {
-        if (msg.from.includes('@g.us')) return;
+        // Skip group messages
+        if (msg.from.includes('@g.us') || msg.to.includes('@g.us')) return;
 
-        // Capture sender raw ID for future fallback
-        lastActiveJid = msg.from;
+        // Skip messages dispatched by bot itself to avoid infinite feedback loops
+        if (msg.fromMe && !msg.to.includes(msg.from)) {
+            return;
+        }
+
+        const effectiveSender = msg.fromMe ? msg.to : msg.from;
+        lastActiveJid = effectiveSender;
+
         let displayName = null;
 
         try {
@@ -61,8 +68,11 @@ client.on('message', async (msg) => {
         }
 
         if (!displayName) {
-            displayName = msg.from;
+            displayName = effectiveSender;
         }
+
+        const body = msg.body;
+        if (!body || body.trim() === '') return;
 
         await axios.post(FASTAPI_WEBHOOK_URL, {
             entry: [{
@@ -70,16 +80,16 @@ client.on('message', async (msg) => {
                     value: {
                         messages: [{
                             from: displayName,
-                            raw_id: msg.from,
+                            raw_id: effectiveSender,
                             type: 'text',
-                            text: { body: msg.body }
+                            text: { body: body }
                         }]
                     }
                 }]
             }]
         });
 
-        console.log(`Forwarded WhatsApp message from: ${displayName} (${msg.from}) to FastAPI`);
+        console.log(`Forwarded WhatsApp message from: ${displayName} (${effectiveSender}) to FastAPI`);
     } catch (err) {
         console.error('Error forwarding message to FastAPI:', err.message);
     }
@@ -96,7 +106,7 @@ app.post('/send-message', async (req, res) => {
     try {
         let chatId = recipient.toString().trim();
 
-        // 1. Resolve contact names like "Self" or text strings without digits
+        // Handle string targets like "Self" or contact names without numbers
         const digitsOnly = chatId.replace(/\D/g, '');
         if (chatId.toLowerCase() === 'self' || (!chatId.includes('@') && digitsOnly.length === 0)) {
             if (lastActiveJid) {
@@ -104,14 +114,14 @@ app.post('/send-message', async (req, res) => {
                 chatId = lastActiveJid;
             } else if (client.info && client.info.wid) {
                 chatId = client.info.wid._serialized;
-                console.log(`Resolved target name "${chatId}" to bot self JID: ${chatId}`);
+                console.log(`Resolved target name "${chatId}" to bot session JID: ${chatId}`);
             } else {
-                return res.status(400).json({ 
-                    error: `Target "${chatId}" cannot be resolved. No prior incoming messages or active session ID found.` 
+                return res.status(400).json({
+                    error: `Target "${chatId}" cannot be resolved. No prior incoming messages or active session ID found.`
                 });
             }
         } 
-        // 2. Format regular numbers to standard WhatsApp format (@c.us)
+        // Handle pure numbers (e.g. 10 digit Indian numbers or full international format)
         else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
             if (digitsOnly.length === 10) {
                 chatId = `91${digitsOnly}@c.us`;
@@ -122,7 +132,6 @@ app.post('/send-message', async (req, res) => {
 
         console.log(`Dispatching message to target ChatId: ${chatId}`);
 
-        // Direct send via client
         await client.sendMessage(chatId, message);
 
         console.log(`Dispatched WhatsApp message successfully to ${chatId}`);
