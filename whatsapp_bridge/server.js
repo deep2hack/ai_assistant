@@ -35,12 +35,15 @@ client.on('ready', () => {
     console.log('✅ WhatsApp Business Client authenticated and ready!');
 });
 
-// Capture all incoming and outgoing messages
+// Capture only real incoming messages and permanently stop self-reply looping
 client.on('message_create', async (msg) => {
     try {
-        console.log(`[RAW WA EVENT] from: ${msg.from} | to: ${msg.to} | fromMe: ${msg.fromMe} | body: ${msg.body}`);
+        // 1. DROP ALL MESSAGES SENT BY THE BOT ITSELF
+        if (msg.fromMe) {
+            return;
+        }
 
-        // Ignore group chats
+        // 2. Ignore group chats
         if ((msg.from && msg.from.includes('@g.us')) || (msg.to && msg.to.includes('@g.us'))) {
             return;
         }
@@ -48,12 +51,7 @@ client.on('message_create', async (msg) => {
         const body = (msg.body || '').trim();
         if (!body) return;
 
-        // Effective sender logic for self-test and incoming messages
-        let effectiveSender = msg.from;
-        if (msg.fromMe) {
-            effectiveSender = msg.to;
-        }
-
+        const effectiveSender = msg.from;
         lastActiveJid = effectiveSender;
 
         let displayName = null;
@@ -109,7 +107,7 @@ app.post('/send-message', async (req, res) => {
     try {
         let chatId = recipient.toString().trim();
 
-        // 1. Resolve 'Self' or contact names without digits
+        // 1. Resolve 'Self' or names without numbers
         const digitsOnly = chatId.replace(/\D/g, '');
         if (chatId.toLowerCase() === 'self' || (!chatId.includes('@') && digitsOnly.length === 0)) {
             if (lastActiveJid) {
@@ -124,7 +122,7 @@ app.post('/send-message', async (req, res) => {
                 });
             }
         } 
-        // 2. Format plain digits to standard WhatsApp format
+        // 2. Format pure phone digits to standard WhatsApp format
         else if (!chatId.includes('@lid') && !chatId.includes('@c.us')) {
             if (digitsOnly.length === 10) {
                 chatId = `91${digitsOnly}@c.us`;
