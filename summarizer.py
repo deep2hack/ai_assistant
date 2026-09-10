@@ -63,18 +63,22 @@ def extract_json_array(text: str) -> list:
     if not text:
         return []
 
-    # 1. Strip reasoning tags if model outputs <think>...</think>
+    # 1. Strip reasoning / thinking tags
     clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    # 2. Strip code fences
-    if "```" in clean_text:
-        match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", clean_text, re.DOTALL)
-        if match:
-            clean_text = match.group(1).strip()
-        else:
-            clean_text = clean_text.strip("`").replace("json\n", "", 1).strip()
+    # 2. Strip markdown code fences
+    clean_text = re.sub(r"^```(?:json)?", "", clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r"```$", "", clean_text, flags=re.MULTILINE).strip()
 
-    # 3. Find first [ and last ]
+    # 3. If model output a single JSON object instead of a list, wrap it
+    if clean_text.startswith("{") and clean_text.endswith("}"):
+        try:
+            single_obj = json.loads(clean_text)
+            return [single_obj]
+        except Exception:
+            pass
+
+    # 4. Find outermost brackets [ ... ]
     start = clean_text.find("[")
     end = clean_text.rfind("]")
 
@@ -87,13 +91,25 @@ def extract_json_array(text: str) -> list:
         except Exception:
             pass
 
-    # 4. Fallback: json.JSONDecoder raw decode to ignore trailing extra data
+    # 5. Regex extraction for array blocks
+    match = re.search(r"(\[.*\])", clean_text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+
+    # 6. Fallback raw decode
     try:
         decoder = json.JSONDecoder()
         if start != -1:
             obj, _ = decoder.raw_decode(clean_text[start:])
             if isinstance(obj, list):
                 return obj
+            if isinstance(obj, dict):
+                return [obj]
     except Exception as e:
         print(f"Fallback JSON parser failed: {e}")
 
@@ -252,7 +268,9 @@ Output strictly a valid JSON array. No explanations, markdown tags, or thinking 
             max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
-        return extract_json_array(raw_text)
+        print(f"[DEBUG GROQ RAW]:\n{raw_text}")
+        drafts = extract_json_array(raw_text)
+        return drafts
     except Exception as e:
         print(f"Error classifying and drafting replies with Groq: {e}")
         return []
