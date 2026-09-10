@@ -10,7 +10,40 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # Production-stable model with high throughput on Groq
-MODEL_NAME = "qwen/qwen3.8-27b"
+MODEL_NAME = "qwen/qwen3.6-27b"
+
+# ==========================================
+# UPSKILLER ACADEMY KNOWLEDGE BASE
+# ==========================================
+UPSKILLER_KNOWLEDGE_BASE = """
+You are the official AI Admissions Counselor & Executive Assistant for Upskiller Academy (Magnum Educorporates, Since 2013).
+Website: upskilleracademy.com
+Brand Motto: "LEARN. PRACTICE. EARN. REPEAT. Join now & start your journey towards financial freedom!"
+
+COURSE IN FOCUS:
+"Professional Forex Trading Program"
+- Target Audience: Beginners to advanced traders, intraday & swing traders, aspiring prop firm traders, and anyone serious about institutional trading.
+- Overview: Covers institutional price action, Smart Money Concepts (SMC), liquidity sweeps, market structure, high-probability setups, risk management, trader psychology, live trading, and prop firm passing strategies (FTMO style).
+
+Key Features:
+• Live Classes with lifetime/recorded access
+• Live Trading Sessions (London & New York market sessions)
+• Expert Mentorship & Real-time Market Insights
+• High Probability Strategies (Liquidity sweeps & sniper entries)
+• Money & Risk Management + Trader Psychology
+• Dedicated Doubt Solving Support & Practice Guidance
+
+Full 9-Module Curriculum:
+01. Forex Basics & Fundamentals
+02. Price Action Trading
+03. Smart Money Concepts (SMC) & ICT Frameworks
+04. Forex Chart Patterns
+05. Forex Sessions Strategy (London & New York timing)
+06. High Probability Setups & Sniper Entries
+07. Risk Management
+08. Trading Psychology
+09. Advanced Forex Concepts & Prop Firm Challenges (FTMO passing)
+"""
 
 
 def extract_json_array(text: str) -> list:
@@ -106,16 +139,16 @@ async def summarize_messages(messages: list) -> str:
     formatted_input = "\n".join(content_lines)
 
     prompt = f"""
-You are an executive AI assistant. Analyze these incoming messages and provide a concise, highly structured briefing for the executive.
+You are an executive AI assistant for Upskiller Academy. Analyze these incoming messages and provide a concise, highly structured briefing for the executive.
 
 MESSAGES:
 {formatted_input}
 
 OUTPUT FORMAT:
 🎯 **Executive Briefing**
-- Group by sender or urgent action items.
+- Group by lead inquiries, course questions, or urgent action items.
 - Mention key points clearly with bold tags.
-- Highlight any pending tasks, meetings, or critical questions.
+- Highlight any pending high-ticket leads, questions, or calls requested.
 Keep it strictly factual, concise, and under 250 words.
 """
 
@@ -138,51 +171,57 @@ Keep it strictly factual, concise, and under 250 words.
 
 async def generate_draft_replies(messages: list) -> list[dict]:
     """
-    Classifies incoming messages into:
-    1. Safe auto-replies (low risk, greetings, common questions) -> can_auto_reply: True
-    2. High-risk decisions requiring human review -> can_auto_reply: False
+    Upskiller Academy Lead Qualification & Direct Dispatch Classifier.
+    Supports English, Hindi, and natural Hinglish auto-matching.
     """
     if not messages or not client:
         return []
 
     content_lines = []
     for m in messages:
-        safe_content = (m.content[:400] + "...") if len(m.content) > 400 else m.content
-        safe_content = safe_content.replace('"', "'").replace("\n", " ")
+        safe_content = (m.content[:400] + "...").replace('"', "'").replace("\n", " ")
         content_lines.append(
             f'{{"id": {m.id}, "platform": "{m.platform}", "sender": "{m.sender}", "content": "{safe_content}"}}'
         )
     formatted_input = "\n".join(content_lines)
 
     prompt = f"""
-You are an autonomous executive AI assistant managing WhatsApp and Email communications.
-Draft an immediate, polite reply for each message and classify whether it can AUTO-REPLY directly.
+{UPSKILLER_KNOWLEDGE_BASE}
+
+Classify incoming student/lead messages on WhatsApp or Email and draft high-converting, professional replies.
+
+LANGUAGE & TONE RULES:
+1. Mirror the user's language naturally:
+   - If the lead asks in Hinglish (e.g. "Bhai course me kya sikhoge? fees kitni hai?"), reply in warm, clean, professional Hinglish.
+   - If the lead asks in pure Hindi, reply in polite Hindi.
+   - If the lead asks in English, reply in professional English.
+2. Keep replies concise, persuasive, and under 3-4 sentences.
+3. Always end with an actionable next step (e.g., "Kya aap demo class attend karna chahenge?", or "Would you like our counselor to call you with the complete syllabus?").
 
 RULES FOR `can_auto_reply`:
-1. SET `can_auto_reply: true` FOR:
-   - Greetings (e.g., "Hi", "Hello", "Hyy", "Good morning", "Hey").
-   - Casual inquiries and check-ins (e.g., "How are you?", "What's up?", "How are u?").
-   - Routine acknowledgments ("Thanks", "Noted", "Okay", "Received").
-   - Simple clarification questions (e.g., "How many days?", "Can you tell me more?").
+1. SET `can_auto_reply = true` FOR:
+   - Course curriculum questions (SMC, ICT, price action, prop firm/FTMO, chart patterns, etc.).
+   - Live session queries (London & New York session live trading).
+   - Greetings & interest checks ("Hi", "Hello", "Forex details bhejo", "Course details please").
+   - Routine fee structure overviews and class timings.
 
-2. SET `can_auto_reply: false` ONLY FOR:
-   - Financial transactions, final payment quotes, discounts, banking or money transfers.
-   - Sharing sensitive passwords, API keys, legal contracts, or signed agreements.
-   - Major project deadline commitments or formal disputes.
+2. SET `can_auto_reply = false` (FLAG FOR HUMAN APPROVAL) FOR:
+   - Direct price negotiation, barter, or requests for special custom discounts.
+   - Bank transfers, scanner/QR codes, UPI ID requests, and payment receipts.
+   - Corporate training, placement tie-ups, or franchise inquiries.
 
 MESSAGES:
 {formatted_input}
 
 TASK:
-Output ONLY a raw JSON array. No explanations, no markdown fences, no thinking tags.
-Output schema:
+Output strictly a valid JSON array. No explanations, markdown tags, or thinking blocks.
 [
   {{
     "platform": "whatsapp",
     "recipient": "sender",
-    "proposed_reply": "short polite response",
+    "proposed_reply": "Natural reply matching the lead's exact language (Hinglish/English/Hindi)",
     "can_auto_reply": true,
-    "intent_reason": "Routine greeting / casual check-in"
+    "intent_reason": "Course inquiry / Lead greeting"
   }}
 ]
 """
@@ -190,16 +229,18 @@ Output schema:
     try:
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a JSON-only API. Output strictly a valid raw JSON array without preamble."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": "You are a multilingual JSON-only CRM counselor for Upskiller Academy. Always mirror the user's language (Hinglish/Hindi/English) and output strictly valid JSON.",
+                },
+                {"role": "user", "content": prompt},
             ],
             model=MODEL_NAME,
             temperature=0.2,
             max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
-        drafts = extract_json_array(raw_text)
-        return drafts
+        return extract_json_array(raw_text)
     except Exception as e:
         print(f"Error classifying and drafting replies with Groq: {e}")
         return []
@@ -211,11 +252,11 @@ async def process_user_chat_command(user_text: str) -> dict:
         return {"intent": "chat", "reply": "⚠️ GROQ_API_KEY configure nahi hai."}
 
     prompt = f"""
-You are an intelligent executive AI assistant. The user typed the following input in the control chat:
+You are an intelligent executive AI assistant for Upskiller Academy. The user typed the following input in the control chat:
 "{user_text}"
 
 Analyze intent:
-1. ACTION INTENT: If the user is asking you to compose, draft, or send an email or WhatsApp message.
+1. ACTION INTENT: If the user is asking you to compose, draft, or send an email or WhatsApp message to a lead or contact.
    Return ONLY JSON:
    {{
      "intent": "action",
@@ -274,9 +315,9 @@ async def check_important_emails_summary(emails: list) -> str:
     mails_text = "\n".join(content_lines)
 
     prompt = f"""
-You are an executive assistant. Review these recent emails and tell the user if there is anything urgent or important requiring attention (e.g. work requests, meetings, deadlines, payments, client inquiries). 
+You are an executive assistant for Upskiller Academy. Review these recent emails and tell the user if there is anything urgent or important requiring attention (e.g. lead inquiries, work requests, meetings, deadlines, payments). 
 
-Ignore newsletters, ads, or routine system notifications.
+Ignore newsletters, spam, or routine system notifications.
 
 EMAILS:
 {mails_text}
@@ -316,7 +357,7 @@ async def check_important_whatsapp_summary(messages: list) -> str:
     chats_text = "\n".join(content_lines)
 
     prompt = f"""
-You are an executive assistant. Analyze these recent WhatsApp messages and report if there is anything urgent or important requiring immediate response (e.g. client requests, deadlines, meetings, questions).
+You are an executive assistant for Upskiller Academy. Analyze these recent WhatsApp messages and report if there is anything urgent or important requiring immediate response (e.g. hot leads, fee payments, student doubts, admissions).
 
 Ignore routine greetings, small talk, or casual chatter.
 
