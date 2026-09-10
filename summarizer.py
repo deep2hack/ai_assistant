@@ -59,18 +59,22 @@ Counselor Conversion Flow:
 
 
 def extract_json_array(text: str) -> list:
-    """Safely extracts a JSON array even if the model outputs thoughts or extra text."""
+    """Safely extracts a JSON array even if the model outputs unclosed thoughts or extra text."""
     if not text:
         return []
 
-    # 1. Strip reasoning / thinking tags
+    # 1. Strip completed <think>...</think> tags
     clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    # 2. Strip markdown code fences
+    # 2. Strip unclosed <think> blocks (happens if thoughts hit max_tokens or end before JSON)
+    if "<think>" in clean_text:
+        clean_text = re.sub(r"^<think>.*?(?=\[)", "", clean_text, flags=re.DOTALL).strip()
+
+    # 3. Strip markdown code fences
     clean_text = re.sub(r"^```(?:json)?", "", clean_text, flags=re.MULTILINE)
     clean_text = re.sub(r"```$", "", clean_text, flags=re.MULTILINE).strip()
 
-    # 3. If model output a single JSON object instead of a list, wrap it
+    # 4. If model output a single JSON object instead of a list, wrap it
     if clean_text.startswith("{") and clean_text.endswith("}"):
         try:
             single_obj = json.loads(clean_text)
@@ -78,7 +82,7 @@ def extract_json_array(text: str) -> list:
         except Exception:
             pass
 
-    # 4. Find outermost brackets [ ... ]
+    # 5. Find outermost brackets [ ... ]
     start = clean_text.find("[")
     end = clean_text.rfind("]")
 
@@ -91,7 +95,7 @@ def extract_json_array(text: str) -> list:
         except Exception:
             pass
 
-    # 5. Regex extraction for array blocks
+    # 6. Regex extraction for array blocks
     match = re.search(r"(\[.*\])", clean_text, re.DOTALL)
     if match:
         try:
@@ -101,7 +105,7 @@ def extract_json_array(text: str) -> list:
         except Exception:
             pass
 
-    # 6. Fallback raw decode
+    # 7. Fallback raw decode
     try:
         decoder = json.JSONDecoder()
         if start != -1:
@@ -122,6 +126,9 @@ def extract_json_object(text: str) -> dict:
         return {}
 
     clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    if "<think>" in clean_text:
+        clean_text = re.sub(r"^<think>.*?(?=\{)", "", clean_text, flags=re.DOTALL).strip()
 
     if "```" in clean_text:
         match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean_text, re.DOTALL)
@@ -183,15 +190,17 @@ Keep it strictly factual, concise, and under 250 words.
     try:
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a concise executive assistant. Never output thinking tags."},
+                {"role": "system", "content": "You are a concise executive assistant. Never output thinking tags, <think> tags, or conversational preambles."},
                 {"role": "user", "content": prompt}
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=600,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
-        return re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
+        clean_text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
+        clean_text = re.sub(r"^<think>.*?\n\n", "", clean_text, flags=re.DOTALL).strip()
+        return clean_text
     except Exception as e:
         print(f"Error generating summary with Groq: {e}")
         return "⚠️ Failed to generate summary due to an API error."
@@ -259,13 +268,13 @@ Output strictly a valid JSON array. No explanations, markdown tags, or thinking 
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a multilingual JSON-only CRM counselor for Upskiller Academy. Always mirror the user's language (Hinglish/Hindi/English) and output strictly valid JSON.",
+                    "content": "You are a JSON-only CRM counselor for Upskiller Academy. Never output thinking tags, <think> tags, or conversational preambles. Output strictly valid JSON arrays starting directly with [ and ending with ].",
                 },
                 {"role": "user", "content": prompt},
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=1024,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         print(f"[DEBUG GROQ RAW]:\n{raw_text}")
@@ -309,12 +318,12 @@ Output strictly valid JSON with no preamble, markdown fences, or thinking tags.
     try:
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a JSON-only assistant. Output strictly a JSON object."},
+                {"role": "system", "content": "You are a JSON-only assistant. Never output thinking tags or <think> blocks. Output strictly a JSON object."},
                 {"role": "user", "content": prompt}
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=600,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         result = extract_json_object(raw_text)
@@ -366,10 +375,12 @@ Keep it strictly under 3-4 concise bullet points.
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=350,
+            max_tokens=400,
         )
         raw = completion.choices[0].message.content.strip()
-        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        clean = re.sub(r"^<think>.*?\n\n", "", clean, flags=re.DOTALL).strip()
+        return clean
     except Exception as e:
         return f"Error analyzing emails: {e}"
 
@@ -408,9 +419,11 @@ Keep it strictly under 3-4 concise bullet points.
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=350,
+            max_tokens=400,
         )
         raw = completion.choices[0].message.content.strip()
-        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        clean = re.sub(r"^<think>.*?\n\n", "", clean, flags=re.DOTALL).strip()
+        return clean
     except Exception as e:
         return f"Error analyzing WhatsApp messages: {e}"
