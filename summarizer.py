@@ -9,7 +9,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# Production-stable model with high throughput on Groq
+# Choose an active model from your verified list
 MODEL_NAME = "qwen/qwen3.6-27b"
 
 # ==========================================
@@ -59,14 +59,14 @@ Counselor Conversion Flow:
 
 
 def extract_json_array(text: str) -> list:
-    """Safely extracts a JSON array even if the model outputs unclosed thoughts or extra text."""
+    """Safely extracts a JSON array even if the model outputs thoughts or extra text."""
     if not text:
         return []
 
     # 1. Strip completed <think>...</think> tags
     clean_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    # 2. Strip unclosed <think> blocks (happens if thoughts hit max_tokens or end before JSON)
+    # 2. Strip unclosed <think> blocks
     if "<think>" in clean_text:
         clean_text = re.sub(r"^<think>.*?(?=\[)", "", clean_text, flags=re.DOTALL).strip()
 
@@ -169,7 +169,7 @@ async def summarize_messages(messages: list) -> str:
 
     content_lines = []
     for m in messages:
-        trimmed_content = (m.content[:500] + "...") if len(m.content) > 500 else m.content
+        trimmed_content = (m.content[:300] + "...") if len(m.content) > 300 else m.content
         content_lines.append(f"- [{m.platform.upper()}] From: {m.sender} | Text: {trimmed_content}")
     formatted_input = "\n".join(content_lines)
 
@@ -184,7 +184,7 @@ OUTPUT FORMAT:
 - Group by lead inquiries, course questions, or urgent action items.
 - Mention key points clearly with bold tags.
 - Highlight any pending high-ticket leads, questions, or calls requested.
-Keep it strictly factual, concise, and under 250 words.
+Keep it strictly factual, concise, and under 200 words.
 """
 
     try:
@@ -195,7 +195,7 @@ Keep it strictly factual, concise, and under 250 words.
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         clean_text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
@@ -216,7 +216,7 @@ async def generate_draft_replies(messages: list) -> list[dict]:
 
     content_lines = []
     for m in messages:
-        safe_content = (m.content[:400] + "...").replace('"', "'").replace("\n", " ")
+        safe_content = (m.content[:250] + "...").replace('"', "'").replace("\n", " ")
         content_lines.append(
             f'{{"id": {m.id}, "platform": "{m.platform}", "sender": "{m.sender}", "content": "{safe_content}"}}'
         )
@@ -227,23 +227,26 @@ async def generate_draft_replies(messages: list) -> list[dict]:
 
 Classify incoming student/lead messages on WhatsApp or Email and draft high-converting, professional replies.
 
+CRITICAL INSTRUCTION:
+Do NOT think or reason before answering. Begin immediately with the `[` character.
+
 LANGUAGE & TONE RULES:
 1. Mirror the user's language naturally:
-   - If the lead asks in Hinglish (e.g. "Bhai course me kya sikhoge? fees kitni hai?"), reply in warm, clean, professional Hinglish.
-   - If the lead asks in pure Hindi, reply in polite Hindi.
-   - If the lead asks in English, reply in professional English.
+   - Hinglish lead -> warm, clean Hinglish.
+   - Pure Hindi lead -> polite Hindi.
+   - English lead -> professional English.
 2. Keep replies concise, persuasive, and under 3-4 sentences.
-3. Always end with an actionable next step (e.g., "Kya aap demo class attend karna chahenge?", or "Would you like our counselor to call you with the complete syllabus?").
+3. Always end with an actionable next step (e.g. asking to book a demo or speak with a counselor).
 
 RULES FOR `can_auto_reply`:
 1. SET `can_auto_reply = true` FOR:
-   - Course overview, 3-month duration, syllabus, or topic inquiries (SMC, ICT, Prop firm, FTMO, London & New York live trading sessions).
+   - Course overview, 3-month duration, syllabus inquiries (SMC, ICT, Prop firm, FTMO, London & New York live trading sessions).
    - Routine fee structure overviews (mention ₹14,999 offer), batch timings (Mon–Fri 8:00 PM – 9:30 PM IST or weekends), and recordings access.
    - Routine greetings & interest checks ("Hi", "Hello", "Hyy", "Forex details bhejo", "Course details please").
    - Routine availability checks or demo booking inquiries.
 
 2. SET `can_auto_reply = false` (FLAG FOR HUMAN APPROVAL) FOR:
-   - Direct price negotiation, barter, or requests for special custom discounts beyond ₹14,999.
+   - Direct price negotiation or custom discounts below ₹14,999.
    - Bank transfers, scanner/QR codes, UPI ID sharing, and payment receipts.
    - Corporate training, placement tie-ups, or franchise inquiries.
 
@@ -268,13 +271,13 @@ Output strictly a valid JSON array. No explanations, markdown tags, or thinking 
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a JSON-only CRM counselor for Upskiller Academy. Never output thinking tags, <think> tags, or conversational preambles. Output strictly valid JSON arrays starting directly with [ and ending with ].",
+                    "content": "You are a JSON-only CRM counselor for Upskiller Academy. You must not generate reasoning or thinking tags. Start output directly with [ and end with ].",
                 },
                 {"role": "user", "content": prompt},
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=1024,
+            max_tokens=500,  # Stays safely under the 1000 OTPM ceiling
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         print(f"[DEBUG GROQ RAW]:\n{raw_text}")
@@ -323,7 +326,7 @@ Output strictly valid JSON with no preamble, markdown fences, or thinking tags.
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         result = extract_json_object(raw_text)
@@ -375,7 +378,7 @@ Keep it strictly under 3-4 concise bullet points.
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=350,
         )
         raw = completion.choices[0].message.content.strip()
         clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
@@ -419,7 +422,7 @@ Keep it strictly under 3-4 concise bullet points.
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=350,
         )
         raw = completion.choices[0].message.content.strip()
         clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
