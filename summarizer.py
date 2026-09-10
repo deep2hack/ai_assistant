@@ -9,8 +9,8 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# Choose an active model from your verified list
-MODEL_NAME = "qwen/qwen3.6-27b"
+# Production-stable model with high throughput on Groq
+MODEL_NAME = "openai/gpt-oss-20b"
 
 # ==========================================
 # UPSKILLER ACADEMY KNOWLEDGE BASE
@@ -277,7 +277,7 @@ Output strictly a valid JSON array. No explanations, markdown tags, or thinking 
             ],
             model=MODEL_NAME,
             temperature=0.2,
-            max_tokens=500,  # Stays safely under the 1000 OTPM ceiling
+            max_tokens=400,
         )
         raw_text = chat_completion.choices[0].message.content.strip()
         print(f"[DEBUG GROQ RAW]:\n{raw_text}")
